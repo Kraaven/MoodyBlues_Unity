@@ -2,11 +2,10 @@ using System;
 using System.Runtime.InteropServices;
 using UnityEngine;
 
-public static class Serializer
+public static partial class Serializer
 {
     public static float RemapRange(float x, float fromMin, float fromMax, float toMin, float toMax)
     {
-        // Add bounds checking to prevent invalid remapping
         if (Mathf.Approximately(fromMax, fromMin)) return toMin;
 
         float normalized = (x - fromMin) / (fromMax - fromMin);
@@ -16,7 +15,6 @@ public static class Serializer
     // -------- 4-byte XYZ BitPacking: X(11) Y(10) Z(11) --------
     public static void SerializeBitPackedXYZToBuffer(int x, int y, int z, Span<byte> destination)
     {
-        // Pack into 32 bits: X(11 bits) + Y(10 bits) + Z(11 bits)
         UInt32 packed = 0;
         packed |= (uint)(x & 0x7FF);
         packed |= (uint)(y & 0x3FF) << 11;
@@ -47,7 +45,7 @@ Event 1  : True Position
 -> 3 floats, 2 bytes each. (Total: 6 bytes) [Range: -500 to +500]
 
 Event 2  : True Rotation (Quaternion, smallest-three)
--> 2 bits dropped-index + 3x10 bits component. (Total: 4 bytes) [Component range: ±0.70711]
+-> 2 bits dropped-index + 3x10 bits component. (Total: 4 bytes) [Component range: ï¿½0.70711]
 
 Event 3  : True RotationSingleAxis
 -> 2 bits axis id + 14 bits angle. (Total: 2 bytes) [Range: 0-360]
@@ -62,7 +60,7 @@ Event 6  : Delta Position
 -> x:11 y:10 z:11 bits. (Total: 4 bytes) [Range: tuned to max per-tick displacement]
 
 Event 7  : Delta Rotation (Quaternion, drop-W)
--> W always dropped (forced non-negative hemisphere) + 3x8 bits component (X,Y,Z). (Total: 3 bytes) [Component range: ±0.5]
+-> W always dropped (forced non-negative hemisphere) + 3x8 bits component (X,Y,Z). (Total: 3 bytes) [Component range: ï¿½0.5]
 
 Event 8  : Delta RotationSingleAxis
 -> 2 bits axis id + 14 bits angle delta. (Total: 2 bytes) [Range: -2.0 to 2.0]
@@ -72,7 +70,7 @@ Event 9  : Delta Scale
 
 Event 10 : Delta UniformScale
 -> 1 float, 1 byte. (Total: 1 byte) [Range: -1.0 to +1.0]
-———————————————————————————————————————
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 --- Combined "Hot Path" Events ---
 
 Event 11 : True Transform
@@ -157,7 +155,7 @@ Event 23 : Delta RotationUniformScale
 
     private const int EnvelopeSize = 3; // 1 byte Event ID + 2 byte Object ID
 
-    private const float PositionRange = 500f;                   // Events 1
+    private const float PositionRange = 500f;                   // Event 1
     private const float TrueRotationComponentRange = 0.70711f;  // Event 2
     private const float TrueSingleAxisAngleMin = 0f;            // Event 3
     private const float TrueSingleAxisAngleMax = 360f;          // Event 3
@@ -165,11 +163,8 @@ Event 23 : Delta RotationUniformScale
     private const float ScaleMax = 10.0f;                        // Events 4, 5, 15
 
     // TODO: tune to the game's actual max per-tick displacement.
-    private const float DeltaPositionRange = 16f;                // Event 6
+    private const float DeltaPositionRange = 1.5f;                // Event 6
     private const float DeltaRotationComponentRange = 0.5f;      // Event 7
-    // NOTE: a quaternion component can only ever be in [-1, 1]. Keeping this range
-    // at ±5.0 wastes most of the 8-bit budget on values that will never occur -
-    // consider tightening this to something like ±1.0 for meaningfully better precision.
     private const float DeltaSingleAxisAngleRange = 2.0f;        // Event 8
     private const float DeltaScaleRange = 1.0f;                  // Events 9, 10, 22, 23
 
@@ -183,7 +178,7 @@ Event 23 : Delta RotationUniformScale
         MemoryMarshal.Cast<byte, ushort>(destination.Slice(1, 2))[0] = objectId;
     }
 
-    private static (EventType eventType, ushort objectId) ReadEnvelope(ReadOnlySpan<byte> source)
+    public static (EventType eventType, ushort objectId) ReadEnvelope(ReadOnlySpan<byte> source)
     {
         EventType eventType = (EventType)source[0];
         ushort objectId = MemoryMarshal.Cast<byte, ushort>(source.Slice(1, 2))[0];
@@ -212,7 +207,6 @@ Event 23 : Delta RotationUniformScale
 
     #region Support Serialization Functions
 
-    // ---- Single float <-> 2 bytes ----
     private static void SerializeFloatToUInt16Buffer(float value, float min, float max, Span<byte> destination)
     {
         ushort quantized = (ushort)QuantizeToBits(value, min, max, 16);
@@ -225,7 +219,6 @@ Event 23 : Delta RotationUniformScale
         return DequantizeFromBits(quantized, min, max, 16);
     }
 
-    // ---- Single float <-> 1 byte ----
     private static void SerializeFloatToByteBuffer(float value, float min, float max, Span<byte> destination)
     {
         destination[0] = (byte)QuantizeToBits(value, min, max, 8);
@@ -236,7 +229,6 @@ Event 23 : Delta RotationUniformScale
         return DequantizeFromBits(source[0], min, max, 8);
     }
 
-    // ---- Vector3 <-> 6 bytes (3x uint16) ----
     private static void SerializeVector3ToUInt16Buffer(Vector3 v, float min, float max, Span<byte> destination)
     {
         SerializeFloatToUInt16Buffer(v.x, min, max, destination.Slice(0, 2));
@@ -252,7 +244,6 @@ Event 23 : Delta RotationUniformScale
         return new Vector3(x, y, z);
     }
 
-    // ---- Vector3 <-> 3 bytes (3x byte) ----
     private static void SerializeVector3ToByteBuffer(Vector3 v, float min, float max, Span<byte> destination)
     {
         destination[0] = (byte)QuantizeToBits(v.x, min, max, 8);
@@ -268,7 +259,6 @@ Event 23 : Delta RotationUniformScale
         return new Vector3(x, y, z);
     }
 
-    // ---- Quaternion (smallest-three) <-> 4 bytes: 2-bit dropped index + 3x10-bit component ----
     private static void SerializeQuaternionSmallestThreeToBuffer(Quaternion q, float componentRange, Span<byte> destination)
     {
         Span<float> components = stackalloc float[4] { q.x, q.y, q.z, q.w };
@@ -285,8 +275,6 @@ Event 23 : Delta RotationUniformScale
             }
         }
 
-        // Force the dropped (largest-magnitude) component positive so the receiver
-        // can reconstruct it as +sqrt(1 - sum of squares) of the other three.
         if (components[droppedIndex] < 0f)
         {
             components[0] = -components[0];
@@ -331,12 +319,6 @@ Event 23 : Delta RotationUniformScale
         return new Quaternion(components[0], components[1], components[2], components[3]);
     }
 
-    // ---- Quaternion (drop-W) <-> 3 bytes: 3x8-bit component (X, Y, Z only) ----
-    // W is always the dropped component (rather than "whichever is largest"). Since W
-    // is not guaranteed to be the largest-magnitude component, we can't rely on dropping
-    // the largest component to keep the reconstruction sign unambiguous - instead we
-    // explicitly force W non-negative by flipping the whole quaternion's sign if needed
-    // (valid because q and -q represent the same rotation).
     private static void SerializeQuaternionDropWToBuffer(Quaternion q, float componentRange, Span<byte> destination)
     {
         float x = q.x, y = q.y, z = q.z, w = q.w;
@@ -365,7 +347,6 @@ Event 23 : Delta RotationUniformScale
         return new Quaternion(x, y, z, w);
     }
 
-    // ---- RotationSingleAxis <-> 2 bytes: 2-bit axis id + 14-bit angle ----
     private static void SerializeRotationSingleAxisToBuffer(byte axisId, float angle, float min, float max, Span<byte> destination)
     {
         uint quantizedAngle = QuantizeToBits(angle, min, max, 14);
@@ -382,7 +363,6 @@ Event 23 : Delta RotationUniformScale
         return (axisId, angle);
     }
 
-    // ---- Delta Position <-> 4 bytes: x(11) y(10) z(11), reusing the existing bit-packer ----
     private static void PackDeltaPositionToBuffer(Vector3 delta, float range, Span<byte> destination)
     {
         int qx = (int)QuantizeToBits(delta.x, -range, range, 11);
@@ -405,318 +385,248 @@ Event 23 : Delta RotationUniformScale
 
     #endregion
 
-    #region Event Serialization Functions
+    #region Event Serialization Functions (non-allocating: write into caller-supplied Span<byte>)
 
     // ---------------- Single-Property Events ----------------
 
-    // Event 1: True Position -> envelope(3) + 6 bytes
-    public static byte[] SerializeTruePosition(ushort objectId, Vector3 position)
+    public const int TruePositionSize = EnvelopeSize + 6;
+    public static int SerializeTruePosition(ushort objectId, Vector3 position, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 6];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TruePosition, objectId, span);
-        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, span.Slice(EnvelopeSize, 6));
-        return buffer;
+        WriteEnvelope(EventType.TruePosition, objectId, destination);
+        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(EnvelopeSize, 6));
+        return TruePositionSize;
     }
 
-    // Event 2: True Rotation -> envelope(3) + 4 bytes
-    public static byte[] SerializeTrueRotation(ushort objectId, Quaternion rotation)
+    public const int TrueRotationSize = EnvelopeSize + 4;
+    public static int SerializeTrueRotation(ushort objectId, Quaternion rotation, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 4];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TrueRotation, objectId, span);
-        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, span.Slice(EnvelopeSize, 4));
-        return buffer;
+        WriteEnvelope(EventType.TrueRotation, objectId, destination);
+        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(EnvelopeSize, 4));
+        return TrueRotationSize;
     }
 
-    // Event 3: True RotationSingleAxis -> envelope(3) + 2 bytes
-    public static byte[] SerializeTrueRotationSingleAxis(ushort objectId, byte axisId, float angle)
+    public const int TrueRotationSingleAxisSize = EnvelopeSize + 2;
+    public static int SerializeTrueRotationSingleAxis(ushort objectId, byte axisId, float angle, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 2];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TrueRotationSingleAxis, objectId, span);
-        SerializeRotationSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, span.Slice(EnvelopeSize, 2));
-        return buffer;
+        WriteEnvelope(EventType.TrueRotationSingleAxis, objectId, destination);
+        SerializeRotationSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, destination.Slice(EnvelopeSize, 2));
+        return TrueRotationSingleAxisSize;
     }
 
-    // Event 4: True Scale -> envelope(3) + 6 bytes
-    public static byte[] SerializeTrueScale(ushort objectId, Vector3 scale)
+    public const int TrueScaleSize = EnvelopeSize + 6;
+    public static int SerializeTrueScale(ushort objectId, Vector3 scale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 6];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TrueScale, objectId, span);
-        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, span.Slice(EnvelopeSize, 6));
-        return buffer;
+        WriteEnvelope(EventType.TrueScale, objectId, destination);
+        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(EnvelopeSize, 6));
+        return TrueScaleSize;
     }
 
-    // Event 5: True UniformScale -> envelope(3) + 2 bytes
-    public static byte[] SerializeTrueUniformScale(ushort objectId, float scale)
+    public const int TrueUniformScaleSize = EnvelopeSize + 2;
+    public static int SerializeTrueUniformScale(ushort objectId, float scale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 2];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TrueUniformScale, objectId, span);
-        SerializeFloatToUInt16Buffer(scale, ScaleMin, ScaleMax, span.Slice(EnvelopeSize, 2));
-        return buffer;
+        WriteEnvelope(EventType.TrueUniformScale, objectId, destination);
+        SerializeFloatToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(EnvelopeSize, 2));
+        return TrueUniformScaleSize;
     }
 
-    // Event 6: Delta Position -> envelope(3) + 4 bytes
-    public static byte[] SerializeDeltaPosition(ushort objectId, Vector3 delta)
+    public const int DeltaPositionSize = EnvelopeSize + 4;
+    public static int SerializeDeltaPosition(ushort objectId, Vector3 delta, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 4];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaPosition, objectId, span);
-        PackDeltaPositionToBuffer(delta, DeltaPositionRange, span.Slice(EnvelopeSize, 4));
-        return buffer;
+        WriteEnvelope(EventType.DeltaPosition, objectId, destination);
+        PackDeltaPositionToBuffer(delta, DeltaPositionRange, destination.Slice(EnvelopeSize, 4));
+        return DeltaPositionSize;
     }
 
-    // Event 7: Delta Rotation -> envelope(3) + 3 bytes (W dropped, reconstructed from X/Y/Z)
-    public static byte[] SerializeDeltaRotation(ushort objectId, Quaternion deltaRotation)
+    public const int DeltaRotationSize = EnvelopeSize + 3;
+    public static int SerializeDeltaRotation(ushort objectId, Quaternion deltaRotation, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 3];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaRotation, objectId, span);
-        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, span.Slice(EnvelopeSize, 3));
-        return buffer;
+        WriteEnvelope(EventType.DeltaRotation, objectId, destination);
+        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(EnvelopeSize, 3));
+        return DeltaRotationSize;
     }
 
     public static Quaternion DeserializeDeltaRotation(ReadOnlySpan<byte> source)
     {
-        // Assumes `source` is already positioned past the envelope, at the 3-byte payload.
         return DeserializeQuaternionDropWFromBuffer(DeltaRotationComponentRange, source);
     }
 
-    // Event 8: Delta RotationSingleAxis -> envelope(3) + 2 bytes
-    public static byte[] SerializeDeltaRotationSingleAxis(ushort objectId, byte axisId, float angleDelta)
+    public const int DeltaRotationSingleAxisSize = EnvelopeSize + 2;
+    public static int SerializeDeltaRotationSingleAxis(ushort objectId, byte axisId, float angleDelta, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 2];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaRotationSingleAxis, objectId, span);
-        SerializeRotationSingleAxisToBuffer(axisId, angleDelta, -DeltaSingleAxisAngleRange, DeltaSingleAxisAngleRange, span.Slice(EnvelopeSize, 2));
-        return buffer;
+        WriteEnvelope(EventType.DeltaRotationSingleAxis, objectId, destination);
+        SerializeRotationSingleAxisToBuffer(axisId, angleDelta, -DeltaSingleAxisAngleRange, DeltaSingleAxisAngleRange, destination.Slice(EnvelopeSize, 2));
+        return DeltaRotationSingleAxisSize;
     }
 
-    // Event 9: Delta Scale -> envelope(3) + 3 bytes
-    public static byte[] SerializeDeltaScale(ushort objectId, Vector3 deltaScale)
+    public const int DeltaScaleSize = EnvelopeSize + 3;
+    public static int SerializeDeltaScale(ushort objectId, Vector3 deltaScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 3];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaScale, objectId, span);
-        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, span.Slice(EnvelopeSize, 3));
-        return buffer;
+        WriteEnvelope(EventType.DeltaScale, objectId, destination);
+        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(EnvelopeSize, 3));
+        return DeltaScaleSize;
     }
 
-    // Event 10: Delta UniformScale -> envelope(3) + 1 byte
-    public static byte[] SerializeDeltaUniformScale(ushort objectId, float deltaScale)
+    public const int DeltaUniformScaleSize = EnvelopeSize + 1;
+    public static int SerializeDeltaUniformScale(ushort objectId, float deltaScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 1];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaUniformScale, objectId, span);
-        SerializeFloatToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, span.Slice(EnvelopeSize, 1));
-        return buffer;
+        WriteEnvelope(EventType.DeltaUniformScale, objectId, destination);
+        SerializeFloatToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(EnvelopeSize, 1));
+        return DeltaUniformScaleSize;
     }
 
     // ---------------- Combined "Hot Path" Events ----------------
 
-    // Event 11: True Transform -> envelope(3) + 16 bytes
-    public static byte[] SerializeTrueTransform(ushort objectId, Vector3 position, Quaternion rotation, Vector3 scale)
+    public const int TrueTransformSize = EnvelopeSize + 16;
+    public static int SerializeTrueTransform(ushort objectId, Vector3 position, Quaternion rotation, Vector3 scale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 16];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TrueTransform, objectId, span);
-
+        WriteEnvelope(EventType.TrueTransform, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, span.Slice(offset, 6));
+        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
         offset += 6;
-        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, span.Slice(offset, 4));
+        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, span.Slice(offset, 6));
-
-        return buffer;
+        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(offset, 6));
+        return TrueTransformSize;
     }
 
-    // Event 12: True PositionRotation -> envelope(3) + 10 bytes
-    public static byte[] SerializeTruePositionRotation(ushort objectId, Vector3 position, Quaternion rotation)
+    public const int TruePositionRotationSize = EnvelopeSize + 10;
+    public static int SerializeTruePositionRotation(ushort objectId, Vector3 position, Quaternion rotation, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 10];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TruePositionRotation, objectId, span);
-
+        WriteEnvelope(EventType.TruePositionRotation, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, span.Slice(offset, 6));
+        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
         offset += 6;
-        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, span.Slice(offset, 4));
-
-        return buffer;
+        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
+        return TruePositionRotationSize;
     }
 
-    // Event 13: True RotationScale -> envelope(3) + 10 bytes
-    public static byte[] SerializeTrueRotationScale(ushort objectId, Quaternion rotation, Vector3 scale)
+    public const int TrueRotationScaleSize = EnvelopeSize + 10;
+    public static int SerializeTrueRotationScale(ushort objectId, Quaternion rotation, Vector3 scale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 10];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TrueRotationScale, objectId, span);
-
+        WriteEnvelope(EventType.TrueRotationScale, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, span.Slice(offset, 4));
+        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, span.Slice(offset, 6));
-
-        return buffer;
+        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(offset, 6));
+        return TrueRotationScaleSize;
     }
 
-    // Event 14: True PositionScale -> envelope(3) + 12 bytes
-    public static byte[] SerializeTruePositionScale(ushort objectId, Vector3 position, Vector3 scale)
+    public const int TruePositionScaleSize = EnvelopeSize + 12;
+    public static int SerializeTruePositionScale(ushort objectId, Vector3 position, Vector3 scale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 12];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TruePositionScale, objectId, span);
-
+        WriteEnvelope(EventType.TruePositionScale, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, span.Slice(offset, 6));
+        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
         offset += 6;
-        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, span.Slice(offset, 6));
-
-        return buffer;
+        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(offset, 6));
+        return TruePositionScaleSize;
     }
 
-    // Event 15: True PositionRotationUniformScale -> envelope(3) + 12 bytes
-    public static byte[] SerializeTruePositionRotationUniformScale(ushort objectId, Vector3 position, Quaternion rotation, float uniformScale)
+    public const int TruePositionRotationUniformScaleSize = EnvelopeSize + 12;
+    public static int SerializeTruePositionRotationUniformScale(ushort objectId, Vector3 position, Quaternion rotation, float uniformScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 12];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TruePositionRotationUniformScale, objectId, span);
-
+        WriteEnvelope(EventType.TruePositionRotationUniformScale, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, span.Slice(offset, 6));
+        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
         offset += 6;
-        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, span.Slice(offset, 4));
+        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeFloatToUInt16Buffer(uniformScale, ScaleMin, ScaleMax, span.Slice(offset, 2));
-
-        return buffer;
+        SerializeFloatToUInt16Buffer(uniformScale, ScaleMin, ScaleMax, destination.Slice(offset, 2));
+        return TruePositionRotationUniformScaleSize;
     }
 
-    // Event 16: True PositionRotationSingleAxis -> envelope(3) + 8 bytes
-    public static byte[] SerializeTruePositionRotationSingleAxis(ushort objectId, Vector3 position, byte axisId, float angle)
+    public const int TruePositionRotationSingleAxisSize = EnvelopeSize + 8;
+    public static int SerializeTruePositionRotationSingleAxis(ushort objectId, Vector3 position, byte axisId, float angle, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 8];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.TruePositionRotationSingleAxis, objectId, span);
-
+        WriteEnvelope(EventType.TruePositionRotationSingleAxis, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, span.Slice(offset, 6));
+        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
         offset += 6;
-        SerializeRotationSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, span.Slice(offset, 2));
-
-        return buffer;
+        SerializeRotationSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, destination.Slice(offset, 2));
+        return TruePositionRotationSingleAxisSize;
     }
 
-    // Event 17: Delta Transform -> envelope(3) + 10 bytes
-    public static byte[] SerializeDeltaTransform(ushort objectId, Vector3 deltaPosition, Quaternion deltaRotation, Vector3 deltaScale)
+    public const int DeltaTransformSize = EnvelopeSize + 10;
+    public static int SerializeDeltaTransform(ushort objectId, Vector3 deltaPosition, Quaternion deltaRotation, Vector3 deltaScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 10];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaTransform, objectId, span);
-
+        WriteEnvelope(EventType.DeltaTransform, objectId, destination);
         int offset = EnvelopeSize;
-        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, span.Slice(offset, 4));
+        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, span.Slice(offset, 3));
+        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(offset, 3));
         offset += 3;
-        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, span.Slice(offset, 3));
-
-        return buffer;
+        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 3));
+        return DeltaTransformSize;
     }
 
-    // Event 18: Delta PositionRotation -> envelope(3) + 7 bytes
-    public static byte[] SerializeDeltaPositionRotation(ushort objectId, Vector3 deltaPosition, Quaternion deltaRotation)
+    public const int DeltaPositionRotationSize = EnvelopeSize + 7;
+    public static int SerializeDeltaPositionRotation(ushort objectId, Vector3 deltaPosition, Quaternion deltaRotation, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 7];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaPositionRotation, objectId, span);
-
+        WriteEnvelope(EventType.DeltaPositionRotation, objectId, destination);
         int offset = EnvelopeSize;
-        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, span.Slice(offset, 4));
+        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, span.Slice(offset, 3));
-
-        return buffer;
+        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(offset, 3));
+        return DeltaPositionRotationSize;
     }
 
-    // Event 19: Delta RotationScale -> envelope(3) + 6 bytes
-    public static byte[] SerializeDeltaRotationScale(ushort objectId, Quaternion deltaRotation, Vector3 deltaScale)
+    public const int DeltaRotationScaleSize = EnvelopeSize + 6;
+    public static int SerializeDeltaRotationScale(ushort objectId, Quaternion deltaRotation, Vector3 deltaScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 6];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaRotationScale, objectId, span);
-
+        WriteEnvelope(EventType.DeltaRotationScale, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, span.Slice(offset, 3));
+        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(offset, 3));
         offset += 3;
-        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, span.Slice(offset, 3));
-
-        return buffer;
+        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 3));
+        return DeltaRotationScaleSize;
     }
 
-    // Event 20: Delta PositionScale -> envelope(3) + 7 bytes
-    public static byte[] SerializeDeltaPositionScale(ushort objectId, Vector3 deltaPosition, Vector3 deltaScale)
+    public const int DeltaPositionScaleSize = EnvelopeSize + 7;
+    public static int SerializeDeltaPositionScale(ushort objectId, Vector3 deltaPosition, Vector3 deltaScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 7];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaPositionScale, objectId, span);
-
+        WriteEnvelope(EventType.DeltaPositionScale, objectId, destination);
         int offset = EnvelopeSize;
-        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, span.Slice(offset, 4));
+        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, span.Slice(offset, 3));
-
-        return buffer;
+        SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 3));
+        return DeltaPositionScaleSize;
     }
 
-    // Event 21: Delta PositionRotationSingleAxis -> envelope(3) + 6 bytes
-    public static byte[] SerializeDeltaPositionRotationSingleAxis(ushort objectId, Vector3 deltaPosition, byte axisId, float angleDelta)
+    public const int DeltaPositionRotationSingleAxisSize = EnvelopeSize + 6;
+    public static int SerializeDeltaPositionRotationSingleAxis(ushort objectId, Vector3 deltaPosition, byte axisId, float angleDelta, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 6];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaPositionRotationSingleAxis, objectId, span);
-
+        WriteEnvelope(EventType.DeltaPositionRotationSingleAxis, objectId, destination);
         int offset = EnvelopeSize;
-        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, span.Slice(offset, 4));
+        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeRotationSingleAxisToBuffer(axisId, angleDelta, -DeltaSingleAxisAngleRange, DeltaSingleAxisAngleRange, span.Slice(offset, 2));
-
-        return buffer;
+        SerializeRotationSingleAxisToBuffer(axisId, angleDelta, -DeltaSingleAxisAngleRange, DeltaSingleAxisAngleRange, destination.Slice(offset, 2));
+        return DeltaPositionRotationSingleAxisSize;
     }
 
-    // Event 22: Delta PositionUniformScale -> envelope(3) + 5 bytes
-    public static byte[] SerializeDeltaPositionUniformScale(ushort objectId, Vector3 deltaPosition, float deltaUniformScale)
+    public const int DeltaPositionUniformScaleSize = EnvelopeSize + 5;
+    public static int SerializeDeltaPositionUniformScale(ushort objectId, Vector3 deltaPosition, float deltaUniformScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 5];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaPositionUniformScale, objectId, span);
-
+        WriteEnvelope(EventType.DeltaPositionUniformScale, objectId, destination);
         int offset = EnvelopeSize;
-        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, span.Slice(offset, 4));
+        PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
         offset += 4;
-        SerializeFloatToByteBuffer(deltaUniformScale, -DeltaScaleRange, DeltaScaleRange, span.Slice(offset, 1));
-
-        return buffer;
+        SerializeFloatToByteBuffer(deltaUniformScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 1));
+        return DeltaPositionUniformScaleSize;
     }
 
-    // Event 23: Delta RotationUniformScale -> envelope(3) + 4 bytes
-    public static byte[] SerializeDeltaRotationUniformScale(ushort objectId, Quaternion deltaRotation, float deltaUniformScale)
+    public const int DeltaRotationUniformScaleSize = EnvelopeSize + 4;
+    public static int SerializeDeltaRotationUniformScale(ushort objectId, Quaternion deltaRotation, float deltaUniformScale, Span<byte> destination)
     {
-        byte[] buffer = new byte[EnvelopeSize + 4];
-        Span<byte> span = buffer;
-        WriteEnvelope(EventType.DeltaRotationUniformScale, objectId, span);
-
+        WriteEnvelope(EventType.DeltaRotationUniformScale, objectId, destination);
         int offset = EnvelopeSize;
-        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, span.Slice(offset, 3));
+        SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(offset, 3));
         offset += 3;
-        SerializeFloatToByteBuffer(deltaUniformScale, -DeltaScaleRange, DeltaScaleRange, span.Slice(offset, 1));
-
-        return buffer;
+        SerializeFloatToByteBuffer(deltaUniformScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 1));
+        return DeltaRotationUniformScaleSize;
     }
+
+    // Largest possible single-event payload — TrueTransform, 16 bytes payload + envelope.
+    public const int MaxEventSize = EnvelopeSize + 16;
 
     #endregion
 }
