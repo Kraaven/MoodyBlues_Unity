@@ -2,8 +2,25 @@ using System;
 using System.Runtime.InteropServices;
 using UnityEngine;
 
+/// <summary>
+/// All multi-byte values on the wire (UInt32/ushort/double via MemoryMarshal.Cast) are written
+/// using the host's native byte order. Every officially supported Unity build target (x86/x64/ARM)
+/// is little-endian, so that's the byte order this protocol uses -- see Spec.md. The static
+/// constructor below fails fast if that assumption is ever violated on some future target.
+/// </summary>
 public static partial class Serializer
 {
+    static Serializer()
+    {
+        if (!BitConverter.IsLittleEndian)
+        {
+            throw new PlatformNotSupportedException(
+                "Serializer packs multi-byte values using the host's native byte order and assumes " +
+                "little-endian (see Spec.md). This platform is big-endian, which would silently " +
+                "produce a wire-incompatible stream.");
+        }
+    }
+
     public static float RemapRange(float x, float fromMin, float fromMax, float toMin, float toMax)
     {
         if (Mathf.Approximately(fromMax, fromMin)) return toMin;
@@ -45,7 +62,7 @@ Event 1  : True Position
 -> 3 floats, 2 bytes each. (Total: 6 bytes) [Range: -500 to +500]
 
 Event 2  : True Rotation (Quaternion, smallest-three)
--> 2 bits dropped-index + 3x10 bits component. (Total: 4 bytes) [Component range: ï¿½0.70711]
+-> 2 bits dropped-index + 3x10 bits component. (Total: 4 bytes) [Component range: +/-0.70711]
 
 Event 3  : True RotationSingleAxis
 -> 2 bits axis id + 14 bits angle. (Total: 2 bytes) [Range: 0-360]
@@ -60,7 +77,7 @@ Event 6  : Delta Position
 -> x:11 y:10 z:11 bits. (Total: 4 bytes) [Range: tuned to max per-tick displacement]
 
 Event 7  : Delta Rotation (Quaternion, drop-W)
--> W always dropped (forced non-negative hemisphere) + 3x8 bits component (X,Y,Z). (Total: 3 bytes) [Component range: ï¿½0.5]
+-> W always dropped (forced non-negative hemisphere) + 3x8 bits component (X,Y,Z). (Total: 3 bytes) [Component range: +/-0.5]
 
 Event 8  : Delta RotationSingleAxis
 -> 2 bits axis id + 14 bits angle delta. (Total: 2 bytes) [Range: -2.0 to 2.0]
@@ -70,7 +87,8 @@ Event 9  : Delta Scale
 
 Event 10 : Delta UniformScale
 -> 1 float, 1 byte. (Total: 1 byte) [Range: -1.0 to +1.0]
-ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+
+--------------------------------------------------------------------------------
 --- Combined "Hot Path" Events ---
 
 Event 11 : True Transform
@@ -112,6 +130,31 @@ Event 22 : Delta PositionUniformScale
 Event 23 : Delta RotationUniformScale
 -> Rotation(3) + UniformScale(1). (Total: 4 bytes)
 
+--------------------------------------------------------------------------------
+--- Session / Lifecycle Events ---
+
+Event 24 : TimeStamp
+-> No standard envelope (no Object ID -- this event is about the stream, not an object).
+   1 byte Event ID + 8 byte double (seconds, Time.timeAsDouble). (Total: 9 bytes)
+   Always the first event physically written for a given simulation tick's batch, so it
+   normally lands as the first bytes of whatever WebSocket message carries that batch.
+
+Event 25 : ShowObject
+-> Envelope only, no payload. (Total: 3 bytes) [Object ID = the object made active]
+
+Event 26 : HideObject
+-> Envelope only, no payload. (Total: 3 bytes) [Object ID = the object made inactive]
+
+Event 27 : InstantiateObject
+-> Envelope's Object ID = newly assigned ID of the spawned instance.
+   Payload: 2 byte Template Object ID (ID of the PrefabInstanceLibrary template this was
+   cloned from) + True Transform (Position(6) + Rotation(4) + Scale(6)).
+   (Total: 3 + 2 + 16 = 21 bytes)
+
+Event 28 : DeleteObject
+-> Envelope only, no payload. (Total: 3 bytes) [Object ID = the object permanently destroyed;
+   this ID is never reused]
+
     Implementation follows below.
     */
 
@@ -141,7 +184,14 @@ Event 23 : Delta RotationUniformScale
         DeltaPositionScale = 20,
         DeltaPositionRotationSingleAxis = 21,
         DeltaPositionUniformScale = 22,
-        DeltaRotationUniformScale = 23
+        DeltaRotationUniformScale = 23,
+
+        // Session / lifecycle events -- see the "Session / Lifecycle Events" doc block above.
+        TimeStamp = 24,
+        ShowObject = 25,
+        HideObject = 26,
+        InstantiateObject = 27,
+        DeleteObject = 28
     }
 
     public static byte GetEventTypeByte(EventType eventType)
@@ -625,8 +675,77 @@ Event 23 : Delta RotationUniformScale
         return DeltaRotationUniformScaleSize;
     }
 
-    // Largest possible single-event payload — TrueTransform, 16 bytes payload + envelope.
-    public const int MaxEventSize = EnvelopeSize + 16;
+    // ---------------- Session / Lifecycle Events ----------------
+
+    // No standard envelope: this event describes the stream itself, not an object, so there's
+    // no Object ID to write. Just EventType byte + an 8-byte double (seconds).
+    public const int TimeStampSize = 1 + 8;
+    public static int SerializeTimeStamp(double timeSeconds, Span<byte> destination)
+    {
+        destination[0] = GetEventTypeByte(EventType.TimeStamp);
+        MemoryMarshal.Cast<byte, double>(destination.Slice(1, 8))[0] = timeSeconds;
+        return TimeStampSize;
+    }
+
+    public static double DeserializeTimeStamp(ReadOnlySpan<byte> source)
+    {
+        return MemoryMarshal.Cast<byte, double>(source.Slice(1, 8))[0];
+    }
+
+    public const int ShowObjectSize = EnvelopeSize;
+    public static int SerializeShowObject(ushort objectId, Span<byte> destination)
+    {
+        WriteEnvelope(EventType.ShowObject, objectId, destination);
+        return ShowObjectSize;
+    }
+
+    public const int HideObjectSize = EnvelopeSize;
+    public static int SerializeHideObject(ushort objectId, Span<byte> destination)
+    {
+        WriteEnvelope(EventType.HideObject, objectId, destination);
+        return HideObjectSize;
+    }
+
+    public const int DeleteObjectSize = EnvelopeSize;
+    public static int SerializeDeleteObject(ushort objectId, Span<byte> destination)
+    {
+        WriteEnvelope(EventType.DeleteObject, objectId, destination);
+        return DeleteObjectSize;
+    }
+
+    // Envelope's Object ID is the NEW instance's ID; templateObjectId identifies which
+    // PrefabInstanceLibrary template (itself a normal tracked object from the initial scene
+    // walk) this instance was cloned from.
+    public const int InstantiateObjectSize = EnvelopeSize + 2 + 16;
+    public static int SerializeInstantiateObject(ushort newObjectId, ushort templateObjectId, Vector3 position, Quaternion rotation, Vector3 scale, Span<byte> destination)
+    {
+        WriteEnvelope(EventType.InstantiateObject, newObjectId, destination);
+        int offset = EnvelopeSize;
+        MemoryMarshal.Cast<byte, ushort>(destination.Slice(offset, 2))[0] = templateObjectId;
+        offset += 2;
+        SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
+        offset += 6;
+        SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
+        offset += 4;
+        SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(offset, 6));
+        return InstantiateObjectSize;
+    }
+
+    public static (ushort templateObjectId, Vector3 position, Quaternion rotation, Vector3 scale) DeserializeInstantiateObject(ReadOnlySpan<byte> source)
+    {
+        int offset = EnvelopeSize;
+        ushort templateObjectId = MemoryMarshal.Cast<byte, ushort>(source.Slice(offset, 2))[0];
+        offset += 2;
+        Vector3 position = DeserializeVector3FromUInt16Buffer(-PositionRange, PositionRange, source.Slice(offset, 6));
+        offset += 6;
+        Quaternion rotation = DeserializeQuaternionSmallestThreeFromBuffer(TrueRotationComponentRange, source.Slice(offset, 4));
+        offset += 4;
+        Vector3 scale = DeserializeVector3FromUInt16Buffer(ScaleMin, ScaleMax, source.Slice(offset, 6));
+        return (templateObjectId, position, rotation, scale);
+    }
+
+    // Largest possible single-event payload across every event type -- currently InstantiateObject.
+    public const int MaxEventSize = InstantiateObjectSize;
 
     #endregion
 }

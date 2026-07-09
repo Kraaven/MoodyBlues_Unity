@@ -2,16 +2,22 @@ using System;
 using UnityEngine;
 
 /// <summary>
-/// Decides which of the 23 event types best represents a transform's change this tick,
-/// and serializes it directly into the destination span. This is the logic that fills
-/// in what BluesStreamer.SerializeTransformData was stubbed out for.
+/// Decides which of the 23 transform event types (see Serializer/Spec.md) best represents a
+/// transform's change this tick, and serializes it directly into the destination span. Called
+/// from BluesStreamer.EnqueueTransform.
 ///
 /// Rules (documented explicitly since none of this was specified upstream):
 ///
-/// 1. TRUE vs DELTA: an object's first-ever tick (IsFirstTick == true, tracked by the
-///    caller since TransformData itself doesn't carry "have we sent this before") always
-///    sends a True* event, because there's no previous state for a receiver to apply a
-///    delta on top of. Every tick after that sends Delta* events.
+/// 1. TRUE vs DELTA: sends a True* event only when the caller has set TransformData.SendTrue --
+///    NOT simply "is this the object's first tick". Ordinary scene objects never need a generic
+///    True* event at all, since the backend already has their initial transform from a separate
+///    scene export (see Spec.md). The only caller that currently sets SendTrue is
+///    BluesSessionManager.ResyncTransformIfChanged, called immediately (not deferred to the next
+///    FixedUpdate) when BluesRuntimeManager.ObjectSetActive reactivates an object that was
+///    hidden -- hidden objects aren't polled, so their last-known state can't be trusted for a
+///    Delta*, and that method only actually sends anything if the object's transform changed
+///    while it was hidden. Newly instantiated objects don't go through this path either -- they
+///    get their true transform via the dedicated InstantiateObject event instead.
 ///
 /// 2. WHICH PROPERTIES CHANGED: position/rotation/scale are each compared against the
 ///    previous tick's value with a small epsilon, and only changed properties are
@@ -27,6 +33,13 @@ using UnityEngine;
 ///    axis every tick. Anything else (free rotation, combined pitch+yaw, etc.) falls
 ///    back to the full quaternion event. This is an optimization on top of correctness,
 ///    so the tolerance is intentionally tight to avoid visibly wrong playback.
+///
+/// NOTE on epsilons: HasPositionChanged/HasRotationChanged/HasScaleChanged below are the
+/// single source of truth for "did this property change enough to care about". The caller
+/// (BluesSessionManager) calls these once per tracked transform per tick to both decide
+/// whether to enqueue anything at all AND to know which properties changed; the results are
+/// passed in via TransformData.PositionChanged/RotationChanged/ScaleChanged so this dispatcher
+/// never re-derives them with a second (previously mismatched) epsilon check.
 /// </summary>
 public static class TransformEventDispatcher
 {
@@ -38,29 +51,40 @@ public static class TransformEventDispatcher
 
     public enum Axis : byte { X = 0, Y = 1, Z = 2 }
 
+    public static bool HasPositionChanged(Vector3 current, Vector3 previous) =>
+        !ApproximatelyEqual(current, previous, PositionEpsilon);
+
+    public static bool HasRotationChanged(Quaternion current, Quaternion previous) =>
+        !ApproximatelyEqualRotation(current, previous);
+
+    public static bool HasScaleChanged(Vector3 current, Vector3 previous) =>
+        !ApproximatelyEqual(current, previous, ScaleEpsilon);
+
     /// <summary>
     /// Serializes the correct event for this transform's change this tick directly into
     /// destination. Returns the number of bytes written (matches one of the SizeXxx
     /// consts in Serializer). destination must be at least Serializer.MaxEventSize long;
     /// the dispatcher only uses however many bytes the chosen event actually needs.
+    ///
+    /// Relies entirely on data.SendTrue/PositionChanged/RotationChanged/ScaleChanged,
+    /// which the caller must have already computed (see BluesSessionManager.FixedUpdate) --
+    /// this method does not re-check epsilons itself.
     /// </summary>
-    public static int SerializeBestFitEvent(ushort objectId, in TransformData data, bool SendFullTransform, Span<byte> destination)
+    public static int SerializeBestFitEvent(ushort objectId, in TransformData data, Span<byte> destination)
     {
-        if (SendFullTransform)
+        if (data.SendTrue)
         {
             return SerializeTrueBestFit(objectId, data, destination);
         }
 
-        bool positionChanged = !ApproximatelyEqual(data.currentPosition, data.previousPosition, PositionEpsilon);
-        bool rotationChanged = !ApproximatelyEqualRotation(data.currentRotation, data.previousRotation);
-        bool scaleChanged = !ApproximatelyEqual(data.currentScale, data.previousScale, ScaleEpsilon);
+        bool positionChanged = data.PositionChanged;
+        bool rotationChanged = data.RotationChanged;
+        bool scaleChanged = data.ScaleChanged;
 
         if (!positionChanged && !rotationChanged && !scaleChanged)
         {
-            // Nothing changed at all -- cheapest possible representation: treat as a
-            // zero position delta so downstream logic doesn't need a 24th "no-op" event
-            // type. Caller can choose to skip calling this entirely in this case instead
-            // (see BluesStreamer for that optimization) but we handle it safely either way.
+            // Nothing changed at all -- caller (BluesSessionManager) is expected to skip
+            // enqueuing entirely in this case, but handle it safely either way.
             return 0;
         }
 
@@ -128,9 +152,9 @@ public static class TransformEventDispatcher
 
     private static int SerializeTrueBestFit(ushort objectId, in TransformData data, Span<byte> destination)
     {
-        // First tick: we don't try to omit "unchanged" properties (there's no previous
-        // state to compare against), so this always sends the full Transform unless the
-        // object's scale is uniform, in which case we save 4 bytes.
+        // True resync: we don't try to omit "unchanged" properties (LastSent* isn't trusted
+        // right now, see TransformData.SendTrue), so this always sends the full Transform unless
+        // the object's scale is uniform, in which case we save 4 bytes.
         bool isUniform = IsUniform(data.currentScale);
 
         if (isUniform)
