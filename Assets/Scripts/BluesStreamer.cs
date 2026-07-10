@@ -15,11 +15,15 @@ using UnityEngine;
 /// profiling data if scenes grow much larger.
 ///
 /// Flushing (draining the ring buffer to the socket) is caller-driven: BluesSessionManager calls
-/// FlushPendingWrites() exactly once per FixedUpdate tick, after all of that tick's events have
-/// been written, instead of once per event. The only time a flush happens mid-tick is the rare
-/// safety-valve case where the ring buffer has no room left for the next event (see
-/// ReserveWithFlushFallback) -- normal sizing (24KB buffer vs. an expected few KB per tick)
-/// should make that essentially never trigger in practice.
+/// FlushPendingWrites() once per FixedUpdate tick, after all of that tick's events have been
+/// written, instead of once per event -- but FlushPendingWrites itself only actually sends once
+/// PacketSize bytes have accumulated (see its own doc comment), so most of those per-tick calls
+/// are a no-op and several ticks' worth of small events get coalesced into one right-sized
+/// WebSocket message. The only time a flush happens outside of that (mid-tick, ignoring the
+/// PacketSize threshold) is the rare safety-valve case where the ring buffer has no room left
+/// for the next event (see ReserveWithFlushFallback) -- normal sizing (24KB buffer vs. an
+/// expected few KB per tick) should make that essentially never trigger in practice -- and on
+/// Dispose, to avoid losing whatever's left unsent when the session ends.
 /// </summary>
 public class BluesStreamer
 {
@@ -27,7 +31,12 @@ public class BluesStreamer
     private const int PacketSize = 8 * 1024;
 
     private readonly ClientWebSocket _socket;
-    private CancellationToken _socketToken;
+    private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+    private CancellationToken _socketToken => _cts.Token;
+
+    // Only used to receive control frames (Ping/Close), never application data -- see
+    // ReceiveLoopAsync.
+    private readonly byte[] _receiveScratch = new byte[256];
 
     private readonly RingBufferAccumulator _accumulator = new RingBufferAccumulator(RingBufferCapacity);
 
@@ -54,12 +63,58 @@ public class BluesStreamer
         {
             await _socket.ConnectAsync(new System.Uri("ws://localhost:8765"), _socketToken);
             Debug.Log("BluesStreamer: WebSocket connected.");
+
+            // Fire-and-forget: keeps a ReceiveAsync perpetually pending for the lifetime of
+            // the socket. See ReceiveLoopAsync's doc comment for why this is required at all.
+            ReceiveLoopAsync();
         }
         catch (Exception ex)
         {
             // Without this, a failed connect just leaves the socket in a non-Open state
             // forever, and flushing silently no-ops every tick with no indication why.
             Debug.LogError($"BluesStreamer: failed to connect - {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Perpetually awaits ReceiveAsync so the underlying ClientWebSocket can service incoming
+    /// control frames. This connection is send-only from our side (the server never sends us
+    /// application data), so it's tempting to think there's nothing to receive -- but
+    /// ClientWebSocket only inspects/responds to a server's keepalive PING (replying with a
+    /// PONG automatically) while a ReceiveAsync call is actually pending. With nothing ever
+    /// calling ReceiveAsync, incoming PINGs just sit unacknowledged: the server's ping_timeout
+    /// (20s by default in the `websockets` library) eventually elapses with no PONG seen, and
+    /// it force-closes the connection with code 1011 "keepalive ping timeout" -- which is
+    /// exactly what was happening before this loop existed, roughly ~40s into every session
+    /// regardless of scene activity.
+    /// </summary>
+    private async void ReceiveLoopAsync()
+    {
+        try
+        {
+            while (_socket.State == WebSocketState.Open)
+            {
+                WebSocketReceiveResult result = await _socket.ReceiveAsync(_receiveScratch, _socketToken);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    Debug.Log("BluesStreamer: server closed the connection.");
+                    return;
+                }
+                // Any real payload from the server is unexpected on this send-only stream --
+                // discard it rather than trying to interpret it as anything meaningful.
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on Dispose (see _cts.Cancel()).
+        }
+        catch (ObjectDisposedException)
+        {
+            // Expected if Dispose() ran while a receive was in flight.
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"BluesStreamer: receive loop ended unexpectedly - {ex}");
         }
     }
 
@@ -85,8 +140,24 @@ public class BluesStreamer
         WriteToAccumulator(scratch);
     }
 
+    /// <summary>
+    /// Lifecycle events (ShowObject/HideObject/DeleteObject/InstantiateObject) aren't tied to
+    /// BluesSessionManager's per-tick poll -- BluesRuntimeManager can call them from anywhere
+    /// (Update, a gameplay script, etc.), so unlike per-tick transform deltas (see
+    /// BluesSessionManager.FixedUpdate, which emits at most one TimeStamp per tick and only if
+    /// that tick actually has changed transforms to report) they can't assume a nearby, still-
+    /// accurate TimeStamp is already in the stream. Every EnqueueXxx lifecycle method below
+    /// therefore stamps its own current time immediately before its event, so the receiver
+    /// always knows exactly when it happened regardless of how it was triggered.
+    /// </summary>
+    private void EnqueueTimeStampForLifecycleEvent()
+    {
+        EnqueueTimeStamp(Time.timeAsDouble);
+    }
+
     public void EnqueueShowObject(ushort objectId)
     {
+        EnqueueTimeStampForLifecycleEvent();
         Span<byte> scratch = stackalloc byte[Serializer.ShowObjectSize];
         Serializer.SerializeShowObject(objectId, scratch);
         WriteToAccumulator(scratch);
@@ -94,6 +165,7 @@ public class BluesStreamer
 
     public void EnqueueHideObject(ushort objectId)
     {
+        EnqueueTimeStampForLifecycleEvent();
         Span<byte> scratch = stackalloc byte[Serializer.HideObjectSize];
         Serializer.SerializeHideObject(objectId, scratch);
         WriteToAccumulator(scratch);
@@ -101,6 +173,7 @@ public class BluesStreamer
 
     public void EnqueueDeleteObject(ushort objectId)
     {
+        EnqueueTimeStampForLifecycleEvent();
         Span<byte> scratch = stackalloc byte[Serializer.DeleteObjectSize];
         Serializer.SerializeDeleteObject(objectId, scratch);
         WriteToAccumulator(scratch);
@@ -108,6 +181,7 @@ public class BluesStreamer
 
     public void EnqueueInstantiateObject(ushort newObjectId, ushort templateObjectId, Vector3 position, Quaternion rotation, Vector3 scale)
     {
+        EnqueueTimeStampForLifecycleEvent();
         Span<byte> scratch = stackalloc byte[Serializer.InstantiateObjectSize];
         Serializer.SerializeInstantiateObject(newObjectId, templateObjectId, position, rotation, scale, scratch);
         WriteToAccumulator(scratch);
@@ -159,9 +233,19 @@ public class BluesStreamer
     #region Flushing
 
     /// <summary>
-    /// Drains everything currently buffered to the socket, in as many PacketSize-capped,
-    /// event-boundary-aligned chunks as needed. Call once per tick after all of that tick's
-    /// EnqueueXxx calls, not per event.
+    /// Called once per tick (after that tick's EnqueueXxx calls -- see
+    /// BluesSessionManager.FixedUpdate), but only actually sends anything once at least
+    /// PacketSize bytes have piled up in the ring buffer. Below that, this is a no-op and the
+    /// data just keeps accumulating -- the point of batching into the ring buffer in the first
+    /// place is to coalesce many ticks' worth of small events (a handful of bytes each) into
+    /// full-size WebSocket messages instead of paying a send + frame-overhead per tick, which is
+    /// what happened before this threshold existed (every tick flushed immediately, so most
+    /// messages were 9-16 bytes).
+    ///
+    /// Once there's enough buffered, drains it in as many PacketSize-capped, event-boundary-
+    /// aligned chunks as currently fit -- but stops as soon as less than PacketSize remains
+    /// rather than draining down to empty, so a small leftover tail stays buffered for the next
+    /// tick(s) to top up instead of going out as its own tiny message.
     /// </summary>
     public async void FlushPendingWrites()
     {
@@ -174,6 +258,8 @@ public class BluesStreamer
             return;
         }
 
+        if (_accumulator.ReadableBytes < PacketSize) return;
+
         _isFlushing = true;
         try
         {
@@ -181,7 +267,7 @@ public class BluesStreamer
             {
                 _flushRequestedWhileBusy = false;
 
-                while (TryPrepareNextChunk(out ReadOnlyMemory<byte> chunk))
+                while (_accumulator.ReadableBytes >= PacketSize && TryPrepareNextChunk(out ReadOnlyMemory<byte> chunk))
                 {
                     if (_socket.State != WebSocketState.Open)
                     {
@@ -261,7 +347,27 @@ public class BluesStreamer
 
     public void Dispose()
     {
-        _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Application Quit", _socketToken);
-        _socket.Dispose();
+        try
+        {
+            // FlushPendingWrites only sends once PacketSize bytes have piled up, so whatever's
+            // still short of that at shutdown would otherwise sit in the ring buffer and get
+            // silently dropped -- drain it unconditionally now instead of losing the tail end
+            // of the session.
+            FlushSync();
+            _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Application Quit", _socketToken);
+        }
+        catch (Exception)
+        {
+            // Best-effort: if the socket's already in a state that rejects CloseAsync (e.g.
+            // never finished connecting), there's nothing further to do here.
+        }
+        finally
+        {
+            // Cancels the pending ReceiveAsync in ReceiveLoopAsync so it unwinds via
+            // OperationCanceledException instead of racing the Dispose() call below.
+            _cts.Cancel();
+            _socket.Dispose();
+            _cts.Dispose();
+        }
     }
 }

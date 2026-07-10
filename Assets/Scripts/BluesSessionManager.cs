@@ -48,11 +48,12 @@ public class BluesSessionManager : MonoBehaviour
 
     private void FixedUpdate()
     {
-        // Every tick's batch of events starts with a TimeStamp event (see Spec.md), written
-        // before any object events so it's always the first thing physically written for this
-        // tick -- and, since flushing happens once at the end of this method, normally also the
-        // first bytes of whatever WebSocket message ends up carrying this tick's data.
-        DataStreamer.EnqueueTimeStamp(Time.timeAsDouble);
+        // Unlike before, a TimeStamp is NOT written unconditionally every tick -- an idle tick
+        // where nothing tracked has moved has no transform data to timestamp, so there's
+        // nothing worth sending at all (see Spec.md). Instead this is set the first time this
+        // tick actually enqueues a transform delta below, so exactly one TimeStamp goes out
+        // per tick, and only for ticks that have something to say.
+        bool timeStampSentThisTick = false;
 
         foreach (var kvp in _tracked)
         {
@@ -89,6 +90,12 @@ public class BluesSessionManager : MonoBehaviour
             bool scaleChanged = TransformEventDispatcher.HasScaleChanged(t.localScale, reference.LastSentScale);
 
             if (!positionChanged && !rotationChanged && !scaleChanged) continue;
+
+            if (!timeStampSentThisTick)
+            {
+                DataStreamer.EnqueueTimeStamp(Time.timeAsDouble);
+                timeStampSentThisTick = true;
+            }
 
             TransformData data = new TransformData
             {

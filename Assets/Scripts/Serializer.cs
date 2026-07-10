@@ -136,8 +136,16 @@ Event 23 : Delta RotationUniformScale
 Event 24 : TimeStamp
 -> No standard envelope (no Object ID -- this event is about the stream, not an object).
    1 byte Event ID + 8 byte double (seconds, Time.timeAsDouble). (Total: 9 bytes)
-   Always the first event physically written for a given simulation tick's batch, so it
-   normally lands as the first bytes of whatever WebSocket message carries that batch.
+   Applies to whatever event(s) immediately follow it in the stream, until the next
+   TimeStamp -- not tied to WebSocket message boundaries (a single message may carry
+   several tick's worth of batched events, see BluesStreamer). Emitted in exactly two
+   situations: (a) once per FixedUpdate tick, immediately before that tick's first
+   transform delta, but ONLY if that tick actually has at least one changed transform to
+   report -- an idle tick with nothing moving emits nothing at all, not even a TimeStamp;
+   and (b) immediately before every ShowObject/HideObject/InstantiateObject/DeleteObject
+   event, since those can be triggered from anywhere (not just the FixedUpdate poll) and
+   so can't rely on a nearby TimeStamp already being accurate -- see BluesStreamer's
+   EnqueueXxx lifecycle methods.
 
 Event 25 : ShowObject
 -> Envelope only, no payload. (Total: 3 bytes) [Object ID = the object made active]
