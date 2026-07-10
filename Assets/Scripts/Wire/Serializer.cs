@@ -3,10 +3,9 @@ using System.Runtime.InteropServices;
 using UnityEngine;
 
 /// <summary>
-/// All multi-byte values on the wire (UInt32/ushort/double via MemoryMarshal.Cast) are written
-/// using the host's native byte order. Every officially supported Unity build target (x86/x64/ARM)
-/// is little-endian, so that's the byte order this protocol uses -- see Spec.md. The static
-/// constructor below fails fast if that assumption is ever violated on some future target.
+/// Non-allocating (de)serializers for the wire events described in Spec.md. Multi-byte values
+/// are written in the host's native byte order, which the static constructor below asserts is
+/// little-endian (true for every currently-supported Unity build target).
 /// </summary>
 public static partial class Serializer
 {
@@ -50,121 +49,7 @@ public static partial class Serializer
         return MemoryMarshal.Cast<byte, UInt32>(source)[0];
     }
 
-
-    /*
-
-=== Event Map v2 ===
-Envelope note: every event below is preceded by a 1-byte Event ID, and 2 byte Object ID
-
---- Single-Property Events ---
-
-Event 1  : True Position
--> 3 floats, 2 bytes each. (Total: 6 bytes) [Range: -500 to +500]
-
-Event 2  : True Rotation (Quaternion, smallest-three)
--> 2 bits dropped-index + 3x10 bits component. (Total: 4 bytes) [Component range: +/-0.70711]
-
-Event 3  : True RotationSingleAxis
--> 2 bits axis id + 14 bits angle. (Total: 2 bytes) [Range: 0-360]
-
-Event 4  : True Scale
--> 3 floats, 2 bytes each. (Total: 6 bytes) [Range: -1.0 to +10.0]
-
-Event 5  : True UniformScale
--> 1 float, 2 bytes. (Total: 2 bytes) [Range: -1.0 to +10.0]
-
-Event 6  : Delta Position
--> x:11 y:10 z:11 bits. (Total: 4 bytes) [Range: tuned to max per-tick displacement]
-
-Event 7  : Delta Rotation (Quaternion, drop-W)
--> W always dropped (forced non-negative hemisphere) + 3x8 bits component (X,Y,Z). (Total: 3 bytes) [Component range: +/-0.5]
-
-Event 8  : Delta RotationSingleAxis
--> 2 bits axis id + 14 bits angle delta. (Total: 2 bytes) [Range: -2.0 to 2.0]
-
-Event 9  : Delta Scale
--> 3 floats, 1 byte each. (Total: 3 bytes) [Range: -1.0 to +1.0]
-
-Event 10 : Delta UniformScale
--> 1 float, 1 byte. (Total: 1 byte) [Range: -1.0 to +1.0]
-
---------------------------------------------------------------------------------
---- Combined "Hot Path" Events ---
-
-Event 11 : True Transform
--> Position(6) + Rotation(4) + Scale(6). (Total: 16 bytes)
-
-Event 12 : True PositionRotation
--> Position(6) + Rotation(4). (Total: 10 bytes)
-
-Event 13 : True RotationScale
--> Rotation(4) + Scale(6). (Total: 10 bytes)
-
-Event 14 : True PositionScale
--> Position(6) + Scale(6). (Total: 12 bytes)
-
-Event 15 : True PositionRotationUniformScale
--> Position(6) + Rotation(4) + UniformScale(2). (Total: 12 bytes)
-
-Event 16 : True PositionRotationSingleAxis
--> Position(6) + RotationSingleAxis(2). (Total: 8 bytes)
-
-Event 17 : Delta Transform
--> Position(4) + Rotation(3) + Scale(3). (Total: 10 bytes)
-
-Event 18 : Delta PositionRotation
--> Position(4) + Rotation(3). (Total: 7 bytes)
-
-Event 19 : Delta RotationScale
--> Rotation(3) + Scale(3). (Total: 6 bytes)
-
-Event 20 : Delta PositionScale
--> Position(4) + Scale(3). (Total: 7 bytes)
-
-Event 21 : Delta PositionRotationSingleAxis
--> Position(4) + RotationSingleAxis(2). (Total: 6 bytes)
-
-Event 22 : Delta PositionUniformScale
--> Position(4) + UniformScale(1). (Total: 5 bytes)
-
-Event 23 : Delta RotationUniformScale
--> Rotation(3) + UniformScale(1). (Total: 4 bytes)
-
---------------------------------------------------------------------------------
---- Session / Lifecycle Events ---
-
-Event 24 : TimeStamp
--> No standard envelope (no Object ID -- this event is about the stream, not an object).
-   1 byte Event ID + 8 byte double (seconds, Time.timeAsDouble). (Total: 9 bytes)
-   Applies to whatever event(s) immediately follow it in the stream, until the next
-   TimeStamp -- not tied to WebSocket message boundaries (a single message may carry
-   several tick's worth of batched events, see BluesStreamer). Emitted in exactly two
-   situations: (a) once per FixedUpdate tick, immediately before that tick's first
-   transform delta, but ONLY if that tick actually has at least one changed transform to
-   report -- an idle tick with nothing moving emits nothing at all, not even a TimeStamp;
-   and (b) immediately before every ShowObject/HideObject/InstantiateObject/DeleteObject
-   event, since those can be triggered from anywhere (not just the FixedUpdate poll) and
-   so can't rely on a nearby TimeStamp already being accurate -- see BluesStreamer's
-   EnqueueXxx lifecycle methods.
-
-Event 25 : ShowObject
--> Envelope only, no payload. (Total: 3 bytes) [Object ID = the object made active]
-
-Event 26 : HideObject
--> Envelope only, no payload. (Total: 3 bytes) [Object ID = the object made inactive]
-
-Event 27 : InstantiateObject
--> Envelope's Object ID = newly assigned ID of the spawned instance.
-   Payload: 2 byte Template Object ID (ID of the PrefabInstanceLibrary template this was
-   cloned from) + True Transform (Position(6) + Rotation(4) + Scale(6)).
-   (Total: 3 + 2 + 16 = 21 bytes)
-
-Event 28 : DeleteObject
--> Envelope only, no payload. (Total: 3 bytes) [Object ID = the object permanently destroyed;
-   this ID is never reused]
-
-    Implementation follows below.
-    */
+    // Event catalog (IDs, payload layout, sizes, ranges) is documented in Spec.md Section 5.
 
     #region Event Type
 
@@ -194,7 +79,7 @@ Event 28 : DeleteObject
         DeltaPositionUniformScale = 22,
         DeltaRotationUniformScale = 23,
 
-        // Session / lifecycle events -- see the "Session / Lifecycle Events" doc block above.
+        // Session / lifecycle events -- see Spec.md Section 5.1.
         TimeStamp = 24,
         ShowObject = 25,
         HideObject = 26,

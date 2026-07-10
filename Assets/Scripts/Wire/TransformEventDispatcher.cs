@@ -2,44 +2,11 @@ using System;
 using UnityEngine;
 
 /// <summary>
-/// Decides which of the 23 transform event types (see Serializer/Spec.md) best represents a
-/// transform's change this tick, and serializes it directly into the destination span. Called
-/// from BluesStreamer.EnqueueTransform.
-///
-/// Rules (documented explicitly since none of this was specified upstream):
-///
-/// 1. TRUE vs DELTA: sends a True* event only when the caller has set TransformData.SendTrue --
-///    NOT simply "is this the object's first tick". Ordinary scene objects never need a generic
-///    True* event at all, since the backend already has their initial transform from a separate
-///    scene export (see Spec.md). The only caller that currently sets SendTrue is
-///    BluesSessionManager.ResyncTransformIfChanged, called immediately (not deferred to the next
-///    FixedUpdate) when BluesRuntimeManager.ObjectSetActive reactivates an object that was
-///    hidden -- hidden objects aren't polled, so their last-known state can't be trusted for a
-///    Delta*, and that method only actually sends anything if the object's transform changed
-///    while it was hidden. Newly instantiated objects don't go through this path either -- they
-///    get their true transform via the dedicated InstantiateObject event instead.
-///
-/// 2. WHICH PROPERTIES CHANGED: position/rotation/scale are each compared against the
-///    previous tick's value with a small epsilon, and only changed properties are
-///    included in the chosen event — this is what makes "combined" events worthwhile
-///    (an object that's only rotating doesn't pay for position bytes it doesn't need).
-///
-/// 3. UNIFORM SCALE: a scale delta/value qualifies as "uniform" only if x == y == z
-///    within epsilon; this collapses 3 bytes -> 1 (delta) or 6 bytes -> 2 (true).
-///
-/// 4. SINGLE-AXIS ROTATION: a rotation delta qualifies as "single axis" only if its
-///    axis-angle representation is aligned with a cardinal axis (X/Y/Z) within a small
-///    angular tolerance -- e.g. a spinning wheel or turret rotates purely around one
-///    axis every tick. Anything else (free rotation, combined pitch+yaw, etc.) falls
-///    back to the full quaternion event. This is an optimization on top of correctness,
-///    so the tolerance is intentionally tight to avoid visibly wrong playback.
-///
-/// NOTE on epsilons: HasPositionChanged/HasRotationChanged/HasScaleChanged below are the
-/// single source of truth for "did this property change enough to care about". The caller
-/// (BluesSessionManager) calls these once per tracked transform per tick to both decide
-/// whether to enqueue anything at all AND to know which properties changed; the results are
-/// passed in via TransformData.PositionChanged/RotationChanged/ScaleChanged so this dispatcher
-/// never re-derives them with a second (previously mismatched) epsilon check.
+/// Picks the smallest wire event that covers whatever changed on a transform this tick and
+/// serializes it into the destination span (called from BluesStreamer.EnqueueTransform).
+/// Event selection rules live in Spec.md Section 5.3; this class also owns the epsilon checks
+/// (HasPositionChanged/HasRotationChanged/HasScaleChanged) that decide "did this change enough
+/// to care about" for both the caller's gating and this dispatcher's own property selection.
 /// </summary>
 public static class TransformEventDispatcher
 {
@@ -61,14 +28,9 @@ public static class TransformEventDispatcher
         !ApproximatelyEqual(current, previous, ScaleEpsilon);
 
     /// <summary>
-    /// Serializes the correct event for this transform's change this tick directly into
-    /// destination. Returns the number of bytes written (matches one of the SizeXxx
-    /// consts in Serializer). destination must be at least Serializer.MaxEventSize long;
-    /// the dispatcher only uses however many bytes the chosen event actually needs.
-    ///
-    /// Relies entirely on data.SendTrue/PositionChanged/RotationChanged/ScaleChanged,
-    /// which the caller must have already computed (see BluesSessionManager.FixedUpdate) --
-    /// this method does not re-check epsilons itself.
+    /// Serializes the best-fit event into destination (at least Serializer.MaxEventSize long)
+    /// and returns the number of bytes written. Relies on data.SendTrue/PositionChanged/
+    /// RotationChanged/ScaleChanged already being computed by the caller.
     /// </summary>
     public static int SerializeBestFitEvent(ushort objectId, in TransformData data, Span<byte> destination)
     {
@@ -81,12 +43,8 @@ public static class TransformEventDispatcher
         bool rotationChanged = data.RotationChanged;
         bool scaleChanged = data.ScaleChanged;
 
-        if (!positionChanged && !rotationChanged && !scaleChanged)
-        {
-            // Nothing changed at all -- caller (BluesSessionManager) is expected to skip
-            // enqueuing entirely in this case, but handle it safely either way.
-            return 0;
-        }
+        // Caller is expected to skip enqueuing entirely when nothing changed; handle it safely anyway.
+        if (!positionChanged && !rotationChanged && !scaleChanged) return 0;
 
         Quaternion deltaRotation = rotationChanged
             ? Quaternion.Inverse(data.previousRotation) * data.currentRotation
@@ -152,9 +110,8 @@ public static class TransformEventDispatcher
 
     private static int SerializeTrueBestFit(ushort objectId, in TransformData data, Span<byte> destination)
     {
-        // True resync: we don't try to omit "unchanged" properties (LastSent* isn't trusted
-        // right now, see TransformData.SendTrue), so this always sends the full Transform unless
-        // the object's scale is uniform, in which case we save 4 bytes.
+        // LastSent* isn't trusted here (see TransformData.SendTrue), so always send the full
+        // transform, unless scale happens to be uniform (saves 4 bytes).
         bool isUniform = IsUniform(data.currentScale);
 
         if (isUniform)
@@ -188,16 +145,14 @@ public static class TransformEventDispatcher
     }
 
     /// <summary>
-    /// Returns true if the rotation's axis-angle representation is closely aligned with
-    /// one cardinal axis, out-ing that axis and the signed angle in degrees around it
-    /// (negative meaning rotated the opposite way around the positive axis direction).
+    /// True if rotation's axis-angle representation is closely aligned with one cardinal axis;
+    /// outs that axis and the signed angle in degrees around it.
     /// </summary>
     private static bool TryGetSingleAxis(Quaternion rotation, out Axis axis, out float signedAngleDegrees)
     {
         rotation.ToAngleAxis(out float angle, out Vector3 rotationAxis);
 
-        // Unity can return a zero-length axis for an identity/near-identity rotation;
-        // treat that as "no rotation" rather than crashing on normalization.
+        // Zero-length axis (identity/near-identity rotation) -- treat as "no rotation".
         if (rotationAxis.sqrMagnitude < 1e-8f)
         {
             axis = Axis.X;
@@ -207,8 +162,6 @@ public static class TransformEventDispatcher
 
         rotationAxis.Normalize();
 
-        // atan2-based comparison to the ideal cardinal axis, converted to degrees, tells
-        // us how far off-axis this rotation is.
         Vector3 absAxis = new Vector3(Mathf.Abs(rotationAxis.x), Mathf.Abs(rotationAxis.y), Mathf.Abs(rotationAxis.z));
 
         Axis bestAxis = absAxis.x >= absAxis.y && absAxis.x >= absAxis.z ? Axis.X
@@ -222,8 +175,7 @@ public static class TransformEventDispatcher
             _ => absAxis.z
         };
 
-        // alignment == 1 means the axis vector is exactly (±1,0,0)-like; convert the
-        // allowed tolerance in degrees to a cosine threshold.
+        // alignment == 1 means the axis is exactly (+/-1,0,0)-like; convert the tolerance to cosine.
         float cosTolerance = Mathf.Cos(SingleAxisAlignmentDegrees * Mathf.Deg2Rad);
         if (alignment < cosTolerance)
         {

@@ -2,23 +2,16 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Owns every prefab the scene wants to be able to spawn at runtime, and provides the only
-/// sanctioned way to show/hide/spawn/destroy tracked objects -- each wrapper here performs the
-/// requested GameObject operation AND emits the matching wire event, so the receiver's view of
-/// the world never drifts from what Unity actually did. See Spec.md for the exact events.
+/// Owns every prefab the scene can spawn at runtime, and is the only sanctioned way to
+/// show/hide/spawn/destroy tracked objects -- each wrapper here performs the GameObject
+/// operation AND emits the matching wire event, so the receiver's view never drifts from
+/// what Unity actually did. See Spec.md Sections 4-5.
 ///
 /// On Awake, every configured prefab is pre-instantiated once as an inactive template under a
-/// dedicated "PrefabInstanceLibrary" object. Runs before BluesSessionManager's own Awake (see
-/// [DefaultExecutionOrder]) specifically so these template instances are already part of the
-/// scene hierarchy by the time BluesSessionManager does its initial walk -- that's what gives
-/// each template a normal, permanent ObjectID, which is exactly the ID InstantiateObject events
-/// reference to tell the receiver which known prefab a new instance was cloned from (the receiver
-/// is expected to already know that prefab's mesh from a separate scene export keyed by the same
-/// IDs; the live event stream only carries transform/lifecycle changes, not geometry).
-///
-/// InstantiateObject() clones a NEW active instance from a template each time it's called --
-/// templates themselves are never shown or moved, so a single template supports any number of
-/// simultaneous live instances of that prefab.
+/// "PrefabInstanceLibrary" object, before BluesSessionManager's own Awake (see
+/// [DefaultExecutionOrder]) so each template picks up a normal, permanent ObjectID during the
+/// initial scene walk. InstantiateObject() then clones a new active instance from a template
+/// each time it's called; templates themselves are never shown or moved.
 /// </summary>
 [DefaultExecutionOrder(-1000)]
 public class BluesRuntimeManager : MonoBehaviour
@@ -31,8 +24,8 @@ public class BluesRuntimeManager : MonoBehaviour
     private readonly List<GameObject> _templateInstances = new();
     private readonly Dictionary<int, ushort> _templateObjectIdByPrefabIndex = new();
 
-    // Live (spawned, not template) instances this manager knows about, so DeleteObject/
-    // ObjectSetActive-by-GameObject can resolve back to an ObjectID.
+    // Spawned (non-template) instances, so DeleteObject/ObjectSetActive can resolve a GameObject
+    // back to its ObjectID.
     private readonly Dictionary<GameObject, ushort> _liveInstanceIds = new();
 
     private BluesStreamer Streamer => BluesSessionManager.Instance.Streamer;
@@ -63,9 +56,8 @@ public class BluesRuntimeManager : MonoBehaviour
 
     private void Start()
     {
-        // Safe to resolve template ObjectIDs here: Unity guarantees every object's Awake (which
-        // is where BluesSessionManager walks the scene and assigns IDs) has already run by the
-        // time any object's Start runs, regardless of relative script execution order.
+        // Safe here: every object's Awake (including BluesSessionManager's ID-assigning walk)
+        // has already run by the time any object's Start runs.
         for (int i = 0; i < _templateInstances.Count; i++)
         {
             GameObject template = _templateInstances[i];
@@ -84,8 +76,7 @@ public class BluesRuntimeManager : MonoBehaviour
 
     /// <summary>
     /// Clones a new active instance of prefabs[prefabIndex], registers it for tracking/polling,
-    /// and emits an InstantiateObject event carrying the template's ObjectID plus the new
-    /// instance's true transform. Returns the spawned instance, or null if prefabIndex is invalid.
+    /// and emits an InstantiateObject event. Returns null if prefabIndex is invalid.
     /// </summary>
     public GameObject InstantiateObject(int prefabIndex, Vector3 position, Quaternion rotation, Vector3 scale, bool startActive = true)
     {
@@ -106,18 +97,15 @@ public class BluesRuntimeManager : MonoBehaviour
         instance.name = prefabs[prefabIndex].name;
         instance.SetActive(startActive);
 
-        // RegisterTransform seeds LastSent* from the instance's current (just-spawned) transform,
-        // so FixedUpdate won't redundantly re-send a second True* event -- the InstantiateObject
-        // event below already carries this instance's true transform, which is exactly what
-        // LastSent* now matches.
+        // RegisterTransform seeds LastSent* from the just-spawned transform, matching what
+        // the InstantiateObject event below already carries -- so FixedUpdate won't redundantly
+        // re-send it.
         ushort newObjectId = BluesSessionManager.Instance.RegisterTransform(instance.transform);
         _liveInstanceIds[instance] = newObjectId;
 
         Streamer.EnqueueInstantiateObject(newObjectId, templateObjectId, position, rotation, scale);
         if (!startActive)
         {
-            // InstantiateObject already carries the true transform; only need to additionally
-            // say "and it started hidden" if that's not the (active) default.
             Streamer.EnqueueHideObject(newObjectId);
         }
 
@@ -125,8 +113,8 @@ public class BluesRuntimeManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Permanently destroys a previously-spawned or scene object: destroys the GameObject,
-    /// stops tracking it, and emits a DeleteObject event. Its ObjectID is never reused.
+    /// Permanently destroys a tracked object: destroys the GameObject, stops tracking it, and
+    /// emits a DeleteObject event.
     /// </summary>
     public void DeleteObject(GameObject go)
     {
@@ -166,11 +154,8 @@ public class BluesRuntimeManager : MonoBehaviour
             Streamer.EnqueueShowObject(id);
             if (!wasActive)
             {
-                // This object wasn't polled while inactive (see BluesSessionManager.FixedUpdate),
-                // so its LastSent* baseline may be stale. Check right now (not deferred to the
-                // next FixedUpdate) whether it actually moved while hidden, and only send a
-                // True* resync if it did -- ObjectSetActive can be called from Update or anywhere
-                // else, so this should go out immediately alongside ShowObject, not lag behind it.
+                // Wasn't polled while inactive, so LastSent* may be stale -- resync now,
+                // immediately alongside ShowObject rather than lagging to the next tick.
                 BluesSessionManager.Instance.ResyncTransformIfChanged(id);
             }
         }

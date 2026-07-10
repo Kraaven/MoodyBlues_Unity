@@ -1,32 +1,24 @@
 using System;
 
 /// <summary>
-/// A fixed-size circular byte buffer that serialized events are written into directly,
-/// with no per-event heap allocation. Designed for a single-writer/single-flusher usage
-/// pattern (one worker thread writes; flushing happens on that same thread when enough
-/// data has accumulated), which matches BluesStreamer's single serialization thread.
+/// Fixed-size circular byte buffer that serialized events are written into directly, with no
+/// per-event heap allocation:
 ///
-/// Usage:
 ///   Span<byte> dest = accumulator.Reserve(Serializer.TruePositionSize);
 ///   int written = Serializer.SerializeTruePosition(objectId, position, dest);
 ///   accumulator.Commit(written);
-///   if (accumulator.ReadableBytes >= FlushThreshold)
-///   {
-///       ReadOnlyMemory<byte> chunk = accumulator.TakeFlushChunk(FlushThreshold);
-///       // send chunk over the socket, then:
+///   if (accumulator.TryTakeFlushChunk(minSize, maxSize, out var chunk)) {
+///       // send chunk, then:
 ///       accumulator.ReleaseFlushChunk(chunk.Length);
 ///   }
 ///
-/// Not thread-safe by design — callers must only Reserve/Commit from the writer thread,
-/// and only Take/ReleaseFlushChunk from whichever thread does the flush (fine if that's
-/// the same thread, which it is here).
+/// Not thread-safe -- caller must own both writing (Reserve/Commit) and flushing
+/// (Take/ReleaseFlushChunk), though they may be different call sites on the same thread.
 /// </summary>
 public sealed class RingBufferAccumulator
 {
-    // A skip-marker byte value that can never collide with a real EventType (EventType
-    // enum values only go up to 23; 0 is unused by any real event ID). Written into the
-    // first byte of a wasted tail region so the reader can recognize and jump over it
-    // instead of transmitting stale bytes left over from a previous lap of the buffer.
+    // Marks a wasted tail region (see Reserve) so the reader can jump over it instead of
+    // transmitting stale bytes. Never collides with a real EventType (those start at 1).
     private const byte SkipMarker = 0;
 
     private readonly byte[] _buffer;
@@ -48,13 +40,9 @@ public sealed class RingBufferAccumulator
     public int FreeBytes => _buffer.Length - _readableCount;
 
     /// <summary>
-    /// Reserves a contiguous span of exactly <paramref name="size"/> bytes to write into.
-    /// If the buffer doesn't have <paramref name="size"/> contiguous bytes before wrapping,
-    /// the write cursor jumps to the start of the buffer first. The wasted tail is stamped
-    /// with a SkipMarker byte (rather than left as stale data from a previous lap), so the
-    /// reader side can recognize and skip it instead of transmitting garbage — see
-    /// TryTakeFlushChunk / SkipMarker.
-    /// Throws if there isn't enough free space even after accounting for the wrap.
+    /// Reserves a contiguous span of exactly <paramref name="size"/> bytes to write into. If
+    /// there isn't room before wrapping, stamps the wasted tail with SkipMarker and wraps the
+    /// write cursor to the start. Throws if there isn't enough free space even after the wrap.
     /// </summary>
     public Span<byte> Reserve(int size)
     {
@@ -64,13 +52,11 @@ public sealed class RingBufferAccumulator
         int contiguousToEnd = _buffer.Length - _writeCursor;
         if (contiguousToEnd < size)
         {
-            // Would cross the seam — check the wasted tail plus a wrap still fits.
+            // Would cross the seam -- check the wasted tail plus a wrap still fits.
             if (FreeBytes < contiguousToEnd + size)
                 throw new InvalidOperationException(
                     $"RingBufferAccumulator full: need {size} bytes (plus {contiguousToEnd} wasted tail), only {FreeBytes} free. Flush more often or grow capacity.");
 
-            // Stamp the tail so the reader recognizes it as skippable padding, not a real
-            // event, then mark it consumed and wrap the write cursor to the start.
             if (contiguousToEnd > 0)
             {
                 _buffer[_writeCursor] = SkipMarker;
@@ -99,21 +85,15 @@ public sealed class RingBufferAccumulator
     }
 
     /// <summary>
-    /// Returns true and outputs a read-only view over up to <paramref name="maxChunkSize"/>
-    /// contiguous readable bytes, if at least <paramref name="minFlushSize"/> contiguous
-    /// bytes are available right now. Does NOT copy — this is a view into the shared buffer,
-    /// so the caller must finish using/sending it before calling ReleaseFlushChunk.
-    /// Contiguity means this may return less than ReadableBytes if the readable region
-    /// wraps around the end of the buffer; call again after releasing to get the rest.
+    /// Outputs a read-only view over up to <paramref name="maxChunkSize"/> contiguous readable
+    /// bytes, if at least <paramref name="minFlushSize"/> are available. Does NOT copy -- caller
+    /// must finish using it before calling ReleaseFlushChunk. May return less than ReadableBytes
+    /// if the readable region wraps; call again after releasing to get the rest.
     /// </summary>
     public bool TryTakeFlushChunk(int minFlushSize, int maxChunkSize, out ReadOnlyMemory<byte> chunk)
     {
-        // If the very next readable byte is a skip marker, it means Reserve() wrapped
-        // the write cursor and stamped this spot as wasted padding — jump the read
-        // cursor past the whole wasted region without ever handing it to the caller.
-        // The wasted region's length was added to _readableCount by Reserve() as
-        // (contiguousToEnd at the time), which is exactly "rest of buffer from where the
-        // marker sits", so skipping straight to the end of the physical array is correct.
+        // Next byte is a skip marker -- Reserve() wrapped and stamped this spot as wasted
+        // padding, so jump the read cursor past it without ever handing it to the caller.
         if (_readableCount > 0 && _buffer[_readCursor] == SkipMarker)
         {
             int wastedLength = _buffer.Length - _readCursor;
