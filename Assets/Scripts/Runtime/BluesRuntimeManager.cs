@@ -103,6 +103,14 @@ public class BluesRuntimeManager : MonoBehaviour
         ushort newObjectId = BluesSessionManager.Instance.RegisterTransform(instance.transform);
         _liveInstanceIds[instance] = newObjectId;
 
+        if (Streamer == null)
+        {
+            // Handshake hasn't completed yet -- spawn proceeds locally, but there's no socket to
+            // report it on. LastSent* above is already seeded from this spawn, so nothing's lost.
+            Debug.LogWarning($"BluesRuntimeManager.InstantiateObject: spawned '{instance.name}' before the handshake completed, no event emitted.");
+            return instance;
+        }
+
         Streamer.EnqueueInstantiateObject(newObjectId, templateObjectId, position, rotation, scale);
         if (!startActive)
         {
@@ -129,7 +137,14 @@ public class BluesRuntimeManager : MonoBehaviour
 
         _liveInstanceIds.Remove(go);
         BluesSessionManager.Instance.UnregisterObject(id);
-        Streamer.EnqueueDeleteObject(id);
+        if (Streamer == null)
+        {
+            Debug.LogWarning($"BluesRuntimeManager.DeleteObject: destroyed '{go.name}' before the handshake completed, no event emitted.");
+        }
+        else
+        {
+            Streamer.EnqueueDeleteObject(id);
+        }
         Destroy(go);
     }
 
@@ -146,6 +161,12 @@ public class BluesRuntimeManager : MonoBehaviour
         if (!TryGetObjectId(go, out ushort id))
         {
             Debug.LogWarning($"BluesRuntimeManager.ObjectSetActive: '{go.name}' isn't a tracked object, no event emitted.");
+            return;
+        }
+
+        if (Streamer == null)
+        {
+            Debug.LogWarning($"BluesRuntimeManager.ObjectSetActive: toggled '{go.name}' before the handshake completed, no event emitted.");
             return;
         }
 

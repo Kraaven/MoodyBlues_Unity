@@ -8,7 +8,7 @@ using UnityEngine.SceneManagement;
 /// and streams changes via BluesStreamer. Also the registry BluesRuntimeManager uses to register/
 /// unregister runtime-spawned objects into the same ID space. See Spec.md Sections 4-5.
 /// </summary>
-public class BluesSessionManager : MonoBehaviour
+public partial class BluesSessionManager : MonoBehaviour
 {
     public static BluesSessionManager Instance { get; private set; }
 
@@ -19,15 +19,19 @@ public class BluesSessionManager : MonoBehaviour
     // Reused scratch list for pruning destroyed objects during FixedUpdate.
     private readonly List<ushort> _deadIdsScratch = new();
 
+    // IDs in the exact order RegisterTransform assigned them during the initial scene walk --
+    // SceneHasher relies on this order matching the backend's own walk. Snapshotted once Awake's
+    // walk finishes, before any runtime spawns can append to _registrationOrder.
+    private readonly List<ushort> _registrationOrder = new();
+    private IReadOnlyList<ushort> _initialWalkObjectIds;
+    public IReadOnlyList<ushort> InitialWalkObjectIds => _initialWalkObjectIds;
+
     private BluesStreamer DataStreamer;
     public BluesStreamer Streamer => DataStreamer;
 
     private void Awake()
     {
         Instance = this;
-
-        // Must exist before Start() so anything spawned early can already enqueue events.
-        DataStreamer = new BluesStreamer();
 
         // Runs after BluesRuntimeManager's Awake (DefaultExecutionOrder -1000), so its
         // PrefabInstanceLibrary templates are already in the hierarchy and get picked up
@@ -36,10 +40,29 @@ public class BluesSessionManager : MonoBehaviour
         {
             InsertTransformIntoList(rootObject.transform);
         }
+
+        _initialWalkObjectIds = _registrationOrder.ToArray();
+    }
+
+    private void Start()
+    {
+        BluesHandshakeClient.PerformHandshakeAndConnect(this);
+    }
+
+    /// <summary>
+    /// Called by BluesHandshakeClient once the handshake response arrives. Until then
+    /// DataStreamer stays null and FixedUpdate no-ops (see Spec.md Section 9) -- no data loss,
+    /// since LastSent* stays seeded at each object's startup transform.
+    /// </summary>
+    public void AttachStreamer(BluesStreamer streamer)
+    {
+        DataStreamer = streamer;
     }
 
     private void FixedUpdate()
     {
+        if (DataStreamer == null) return; // Handshake hasn't completed yet.
+
         // Set the first time this tick actually enqueues a transform delta, so exactly one
         // TimeStamp goes out per tick, and only for ticks that have something to report.
         bool timeStampSentThisTick = false;
@@ -141,6 +164,7 @@ public class BluesSessionManager : MonoBehaviour
         };
         _tracked.Add(id, reference);
         _idByTransform.Add(t, id);
+        _registrationOrder.Add(id);
         return id;
     }
 
@@ -180,6 +204,7 @@ public class BluesSessionManager : MonoBehaviour
     /// </summary>
     public void ResyncTransformIfChanged(ushort id)
     {
+        if (DataStreamer == null) return; // Handshake hasn't completed yet.
         if (!_tracked.TryGetValue(id, out TransformReference reference)) return;
         Transform t = reference.PollingTransform;
         if (t == null) return;

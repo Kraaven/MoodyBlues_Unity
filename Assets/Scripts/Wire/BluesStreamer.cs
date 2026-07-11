@@ -33,8 +33,11 @@ public class BluesStreamer
     private bool _isFlushing;
     private bool _flushRequestedWhileBusy;
 
-    public BluesStreamer()
+    private readonly Uri _webSocketUri;
+
+    public BluesStreamer(Uri webSocketUri)
     {
+        _webSocketUri = webSocketUri;
         _socket = new ClientWebSocket();
         ConnectAsync();
     }
@@ -43,7 +46,7 @@ public class BluesStreamer
     {
         try
         {
-            await _socket.ConnectAsync(new System.Uri("ws://localhost:8765"), _socketToken);
+            await _socket.ConnectAsync(_webSocketUri, _socketToken);
             Debug.Log("BluesStreamer: WebSocket connected.");
             ReceiveLoopAsync();
         }

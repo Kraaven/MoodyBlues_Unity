@@ -1,5 +1,7 @@
 {
   "dependencies": {
+    "org.khronos.unitygltf": "https://github.com/KhronosGroup/UnityGLTF.git",
+    "com.unity.cloud.draco": "5.4.2",
     "com.unity.ai.navigation": "2.0.12",
     "com.unity.collab-proxy": "2.12.4",
     "com.unity.ide.rider": "3.0.39",
