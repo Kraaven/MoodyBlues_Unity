@@ -11,6 +11,6 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 9e756fb9f0a1450789eef05bf350e285, type: 3}
   m_Name: BluesClientConfig
-  m_EditorClassIdentifier:
-  developerId: local-dev
-  backendBaseUrl: http://localhost:8765
+  m_EditorClassIdentifier: 
+  developerId: znY9TNYa0Mn8aSfb
+  backendBaseUrl: https://moodyblues.kraaven.net

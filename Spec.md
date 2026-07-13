@@ -353,13 +353,16 @@ initial scene walk (Section 4), so both sides agree on ordering without needing 
 separately:
 
 1. UTF-8 bytes of the active scene's name, then one `0x00` separator byte.
-2. For every ObjectID assigned during the initial scene walk, in assignment order: UTF-8 bytes of
-   that object's GameObject name, one `0x00` separator byte, then the ObjectID as 2 bytes
-   little-endian.
+2. For every ObjectID assigned during the initial scene walk, in assignment order:
+   a. UTF-8 bytes of that object's GameObject name, then one `0x00` separator byte.
+   b. The ObjectID as 2 bytes little-endian.
+   c. The object's `localPosition` as 3 × float32 little-endian (x, y, z).
+   d. The object's `localRotation` as 4 × float32 little-endian (x, y, z, w).
+   e. The object's `localScale` as 3 × float32 little-endian (x, y, z).
 3. `sceneHash` = SHA-256 of the whole buffer, encoded as a 64-character lowercase hex string.
 
-This folds in both the scene's own name and every tracked object's (name, ID) pair, so it catches
-a scene rename as well as any ID-mapping drift between the client and the backend's static export.
+This folds in the scene name, every tracked object's (name, ID) pair, and its current transform,
+so it catches scene renames, ID-mapping drift, and any transform edits (position, rotation, scale).
 
 ### 9.3 Scene export (GLTF)
 
