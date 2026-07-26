@@ -94,7 +94,9 @@ public class BluesRuntimeManager : MonoBehaviour
 
         GameObject instance = Instantiate(_templateInstances[prefabIndex], position, rotation);
         instance.transform.localScale = scale;
-        instance.name = prefabs[prefabIndex].name;
+        // "PrefabName_clone-XXXXXX": the suffix is cosmetic only (ObjectID, not name, drives all
+        // tracking/lookup via _liveInstanceIds/_idByTransform), so collisions are harmless.
+        instance.name = $"{prefabs[prefabIndex].name}_clone-{Random.Range(0, 1000000):D6}";
         instance.SetActive(startActive);
 
         // RegisterTransform seeds LastSent* from the just-spawned transform, matching what

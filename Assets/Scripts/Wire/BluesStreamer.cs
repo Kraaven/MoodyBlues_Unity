@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Threading;
+using System.Threading.Tasks;
 using UnityEngine;
 
 /// <summary>
@@ -292,7 +293,7 @@ public class BluesStreamer
         {
             // Drain unconditionally so the sub-PacketSize tail isn't silently dropped at shutdown.
             FlushSync();
-            _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Application Quit", _socketToken);
+            CloseSocketBlocking(reason: "StopStreaming", timeout: TimeSpan.FromSeconds(2));
         }
         catch (Exception)
         {
@@ -304,6 +305,37 @@ public class BluesStreamer
             _cts.Cancel();
             _socket.Dispose();
             _cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Blocks the calling (main) thread until the WebSocket close handshake completes, or until
+    /// timeout elapses. Called from Dispose (BluesSessionManager.StopStreaming/OnApplicationQuit),
+    /// which are synchronous MonoBehaviour callbacks that can't await -- without blocking here, a
+    /// fire-and-forget CloseAsync would almost always be aborted by the immediate _socket.Dispose()
+    /// in Dispose()'s finally block before the close frame actually reaches the server, forcing the
+    /// backend to fall back on its 10s inactivity timeout instead of finalizing the session promptly.
+    /// </summary>
+    private void CloseSocketBlocking(string reason, TimeSpan timeout)
+    {
+        if (_socket.State != WebSocketState.Open && _socket.State != WebSocketState.CloseReceived)
+        {
+            return;
+        }
+
+        try
+        {
+            Task closeTask = _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, reason, _socketToken);
+            Task finished = Task.WhenAny(closeTask, Task.Delay(timeout)).GetAwaiter().GetResult();
+            if (finished != closeTask)
+            {
+                Debug.LogWarning("BluesStreamer: WebSocket close handshake timed out; forcing disposal. " +
+                                  "The backend's 10s inactivity timeout will finalize the session instead.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"BluesStreamer: CloseAsync failed - {ex.Message}");
         }
     }
 }

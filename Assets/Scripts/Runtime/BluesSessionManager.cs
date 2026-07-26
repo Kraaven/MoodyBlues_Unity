@@ -29,6 +29,8 @@ public partial class BluesSessionManager : MonoBehaviour
     private BluesStreamer DataStreamer;
     public BluesStreamer Streamer => DataStreamer;
 
+    private bool _streamingStopped;
+
     private void Awake()
     {
         Instance = this;
@@ -233,7 +235,41 @@ public partial class BluesSessionManager : MonoBehaviour
 
     private void OnDestroy()
     {
-        DataStreamer?.Dispose();
+        // OnDestroy also fires on scene unload/component destruction, not just app quit -- but
+        // StopStreaming is idempotent, so this is just a safety net alongside OnApplicationQuit.
+        StopStreaming();
         if (Instance == this) Instance = null;
+    }
+
+    private void OnApplicationQuit()
+    {
+        StopStreaming();
+    }
+
+    /// <summary>
+    /// Public API: ends the current recording immediately. Safe to call manually (e.g. a
+    /// developer wants to stop recording mid-session) or let it happen automatically on app
+    /// quit -- idempotent, so calling it more than once (or after it already ran) is a no-op.
+    ///
+    /// The buffer is flushed and the WebSocket is closed synchronously (blocking, with a short
+    /// timeout) so the backend is told promptly rather than relying solely on its 10s inactivity
+    /// timeout. All tracking/streaming is then disabled; gameplay objects themselves are left
+    /// untouched (this only stops recording, it doesn't tear down the scene).
+    /// </summary>
+    public void StopStreaming()
+    {
+        if (_streamingStopped) return;
+        _streamingStopped = true;
+
+        // Dispose() flushes the ring buffer (FlushSync) and blocks briefly on a clean WebSocket
+        // close before returning -- see BluesStreamer.Dispose/CloseSocketBlocking.
+        DataStreamer?.Dispose();
+
+        // Stop FixedUpdate polling and drop all tracking state. Gameplay GameObjects are not
+        // touched -- this only disables the recording/streaming machinery.
+        enabled = false;
+        _tracked.Clear();
+        _idByTransform.Clear();
+        _deadIdsScratch.Clear();
     }
 }
