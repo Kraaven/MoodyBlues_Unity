@@ -143,11 +143,11 @@ public class BluesStreamer
         WriteToAccumulator(scratch);
     }
 
-    public void EnqueueInstantiateObject(ushort newObjectId, ushort templateObjectId, Vector3 position, Quaternion rotation, Vector3 scale)
+    public void EnqueueInstantiateObject(ushort newObjectId, ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale)
     {
         EnqueueTimeStampForLifecycleEvent();
         Span<byte> scratch = stackalloc byte[Serializer.InstantiateObjectSize];
-        Serializer.SerializeInstantiateObject(newObjectId, templateObjectId, position, rotation, scale, scratch);
+        Serializer.SerializeInstantiateObject(newObjectId, templateObjectId, parentObjectId, position, rotation, scale, scratch);
         WriteToAccumulator(scratch);
     }
 

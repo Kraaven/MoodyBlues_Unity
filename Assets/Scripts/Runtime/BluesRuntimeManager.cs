@@ -78,7 +78,7 @@ public class BluesRuntimeManager : MonoBehaviour
     /// Clones a new active instance of prefabs[prefabIndex], registers it for tracking/polling,
     /// and emits an InstantiateObject event. Returns null if prefabIndex is invalid.
     /// </summary>
-    public GameObject InstantiateObject(int prefabIndex, Vector3 position, Quaternion rotation, Vector3 scale, bool startActive = true)
+    public GameObject InstantiateObject(int prefabIndex, Vector3 position, Quaternion rotation, Vector3 scale, Transform parent = null, bool startActive = true)
     {
         if (prefabIndex < 0 || prefabIndex >= _templateInstances.Count || _templateInstances[prefabIndex] == null)
         {
@@ -94,9 +94,10 @@ public class BluesRuntimeManager : MonoBehaviour
 
         GameObject instance = Instantiate(_templateInstances[prefabIndex], position, rotation);
         instance.transform.localScale = scale;
-        // "PrefabName_clone-XXXXXX": the suffix is cosmetic only (ObjectID, not name, drives all
-        // tracking/lookup via _liveInstanceIds/_idByTransform), so collisions are harmless.
-        instance.name = $"{prefabs[prefabIndex].name}_clone-{Random.Range(0, 1000000):D6}";
+        if (parent != null && !parent.gameObject.isStatic) instance.transform.SetParent(parent);
+            // "PrefabName_clone-XXXXXX": the suffix is cosmetic only (ObjectID, not name, drives all
+            // tracking/lookup via _liveInstanceIds/_idByTransform), so collisions are harmless.
+            instance.name = $"{prefabs[prefabIndex].name}_clone-{Random.Range(0, 1000000):D6}";
         instance.SetActive(startActive);
 
         // RegisterTransform seeds LastSent* from the just-spawned transform, matching what
@@ -113,7 +114,15 @@ public class BluesRuntimeManager : MonoBehaviour
             return instance;
         }
 
-        Streamer.EnqueueInstantiateObject(newObjectId, templateObjectId, position, rotation, scale);
+        ushort parentObjectId = 0;
+        if (parent != null && TryGetObjectId(parent.gameObject, out parentObjectId))
+        {
+            Streamer.EnqueueInstantiateObject(newObjectId, templateObjectId, parentObjectId, instance.transform.localPosition, instance.transform.localRotation, instance.transform.localScale);
+        }
+        else
+        {
+            Streamer.EnqueueInstantiateObject(newObjectId, templateObjectId, parentObjectId, instance.transform.localPosition, instance.transform.localRotation, instance.transform.localScale);
+        }
         if (!startActive)
         {
             Streamer.EnqueueHideObject(newObjectId);

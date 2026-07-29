@@ -608,13 +608,16 @@ public static partial class Serializer
 
     // Envelope's Object ID is the NEW instance's ID; templateObjectId identifies which
     // PrefabInstanceLibrary template (itself a normal tracked object from the initial scene
-    // walk) this instance was cloned from.
-    public const int InstantiateObjectSize = EnvelopeSize + 2 + 16;
-    public static int SerializeInstantiateObject(ushort newObjectId, ushort templateObjectId, Vector3 position, Quaternion rotation, Vector3 scale, Span<byte> destination)
+    // walk) this instance was cloned from; parentObjectId is the ID of the parent transform
+    // (0 means under the scene root).
+    public const int InstantiateObjectSize = EnvelopeSize + 2 + 2 + 16;
+    public static int SerializeInstantiateObject(ushort newObjectId, ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale, Span<byte> destination)
     {
         WriteEnvelope(EventType.InstantiateObject, newObjectId, destination);
         int offset = EnvelopeSize;
         MemoryMarshal.Cast<byte, ushort>(destination.Slice(offset, 2))[0] = templateObjectId;
+        offset += 2;
+        MemoryMarshal.Cast<byte, ushort>(destination.Slice(offset, 2))[0] = parentObjectId;
         offset += 2;
         SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
         offset += 6;
@@ -624,17 +627,19 @@ public static partial class Serializer
         return InstantiateObjectSize;
     }
 
-    public static (ushort templateObjectId, Vector3 position, Quaternion rotation, Vector3 scale) DeserializeInstantiateObject(ReadOnlySpan<byte> source)
+    public static (ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) DeserializeInstantiateObject(ReadOnlySpan<byte> source)
     {
         int offset = EnvelopeSize;
         ushort templateObjectId = MemoryMarshal.Cast<byte, ushort>(source.Slice(offset, 2))[0];
+        offset += 2;
+        ushort parentObjectId = MemoryMarshal.Cast<byte, ushort>(source.Slice(offset, 2))[0];
         offset += 2;
         Vector3 position = DeserializeVector3FromUInt16Buffer(-PositionRange, PositionRange, source.Slice(offset, 6));
         offset += 6;
         Quaternion rotation = DeserializeQuaternionSmallestThreeFromBuffer(TrueRotationComponentRange, source.Slice(offset, 4));
         offset += 4;
         Vector3 scale = DeserializeVector3FromUInt16Buffer(ScaleMin, ScaleMax, source.Slice(offset, 6));
-        return (templateObjectId, position, rotation, scale);
+        return (templateObjectId, parentObjectId, position, rotation, scale);
     }
 
     // Largest possible single-event payload across every event type -- currently InstantiateObject.
