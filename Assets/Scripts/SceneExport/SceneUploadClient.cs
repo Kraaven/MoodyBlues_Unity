@@ -5,43 +5,46 @@ using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Networking;
 
-/// <summary>
-/// POSTs an exported scene's raw .glb bytes to the backend's sceneUploadUrl (see Spec.md
-/// Section 9). Body is gzip-compressed to cut transfer size, since UnityGLTF has no export-side
-/// Draco support today (see SceneGltfExporter).
-/// </summary>
-public static class SceneUploadClient
+namespace MoodyBlues
 {
-    public static async Task UploadAsync(string sceneUploadUrl, byte[] glbBytes)
+    /// <summary>
+    /// POSTs an exported scene's raw .glb bytes to the backend's sceneUploadUrl (see Spec.md
+    /// Section 9). Body is gzip-compressed to cut transfer size, since UnityGLTF has no export-side
+    /// Draco support today (see SceneGltfExporter).
+    /// </summary>
+    public static class SceneUploadClient
     {
-        byte[] body = Gzip(glbBytes);
-
-        using UnityWebRequest req = new UnityWebRequest(sceneUploadUrl, UnityWebRequest.kHttpVerbPOST)
+        public static async Task UploadAsync(string sceneUploadUrl, byte[] glbBytes)
         {
-            uploadHandler = new UploadHandlerRaw(body),
-            downloadHandler = new DownloadHandlerBuffer()
-        };
-        req.SetRequestHeader("Content-Type", "model/gltf-binary");
-        req.SetRequestHeader("Content-Encoding", "gzip");
+            byte[] body = Gzip(glbBytes);
 
-        var tcs = new TaskCompletionSource<bool>();
-        UnityWebRequestAsyncOperation op = req.SendWebRequest();
-        op.completed += _ => tcs.SetResult(true);
-        await tcs.Task;
+            using UnityWebRequest req = new UnityWebRequest(sceneUploadUrl, UnityWebRequest.kHttpVerbPOST)
+            {
+                uploadHandler = new UploadHandlerRaw(body),
+                downloadHandler = new DownloadHandlerBuffer()
+            };
+            req.SetRequestHeader("Content-Type", "model/gltf-binary");
+            req.SetRequestHeader("Content-Encoding", "gzip");
 
-        if (req.result != UnityWebRequest.Result.Success)
-        {
-            throw new Exception($"SceneUploadClient: upload to '{sceneUploadUrl}' failed - {req.error}");
+            var tcs = new TaskCompletionSource<bool>();
+            UnityWebRequestAsyncOperation op = req.SendWebRequest();
+            op.completed += _ => tcs.SetResult(true);
+            await tcs.Task;
+
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                throw new Exception($"SceneUploadClient: upload to '{sceneUploadUrl}' failed - {req.error}");
+            }
         }
-    }
 
-    private static byte[] Gzip(byte[] data)
-    {
-        using var output = new MemoryStream();
-        using (var gzip = new GZipStream(output, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+        private static byte[] Gzip(byte[] data)
         {
-            gzip.Write(data, 0, data.Length);
+            using var output = new MemoryStream();
+            using (var gzip = new GZipStream(output, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+            {
+                gzip.Write(data, 0, data.Length);
+            }
+            return output.ToArray();
         }
-        return output.ToArray();
     }
 }

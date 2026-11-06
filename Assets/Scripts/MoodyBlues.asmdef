@@ -1,0 +1,23 @@
+{
+    "name": "MoodyBlues",
+    "rootNamespace": "MoodyBlues",
+    "references": [
+        "Unity.Burst",
+        "Unity.Collections",
+        "UnityGLTFScripts",
+        "GLTFSerialization",
+        "UnityGLTF.Plugins",
+        "UnityGLTF.Helpers"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "Newtonsoft.Json.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
