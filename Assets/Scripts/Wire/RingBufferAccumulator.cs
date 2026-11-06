@@ -19,14 +19,21 @@ namespace MoodyBlues
     /// </summary>
     public sealed class RingBufferAccumulator
     {
-        // Marks a wasted tail region (see Reserve) so the reader can jump over it instead of
-        // transmitting stale bytes. Never collides with a real EventType (those start at 1).
+        // Stamped at the start of a wasted tail region (see Reserve). The reader finds padding by
+        // position (_wrapAt), not by this value; the marker is kept so a raw dump of the buffer is
+        // readable, and because no real EventType is 0 it can never be mistaken for an event.
         private const byte SkipMarker = 0;
 
         private readonly byte[] _buffer;
         private int _writeCursor;   // next byte to write to
         private int _readCursor;    // next byte to flush from
         private int _readableCount; // bytes between _readCursor and _writeCursor, logically
+
+        // Where the current lap's real data ends, when Reserve has wrapped and stamped the tail
+        // [_wrapAt, Capacity) as padding; -1 when no padding is pending. The reader must stop at
+        // this index: the padding is counted in _readableCount but is not part of any event, so a
+        // chunk that ran past it would put padding on the wire and cut later events in half.
+        private int _wrapAt = -1;
 
         public RingBufferAccumulator(int capacity)
         {
@@ -63,6 +70,7 @@ namespace MoodyBlues
                 {
                     _buffer[_writeCursor] = SkipMarker;
                 }
+                _wrapAt = _writeCursor;
                 _readableCount += contiguousToEnd;
                 _writeCursor = 0;
             }
@@ -94,17 +102,20 @@ namespace MoodyBlues
         /// </summary>
         public bool TryTakeFlushChunk(int minFlushSize, int maxChunkSize, out ReadOnlyMemory<byte> chunk)
         {
-            // Next byte is a skip marker -- Reserve() wrapped and stamped this spot as wasted
-            // padding, so jump the read cursor past it without ever handing it to the caller.
-            if (_readableCount > 0 && _buffer[_readCursor] == SkipMarker)
+            // Reached the padding Reserve() stamped when it wrapped: jump the read cursor past it
+            // without ever handing it to the caller.
+            if (_readableCount > 0 && _wrapAt >= 0 && _readCursor == _wrapAt)
             {
                 int wastedLength = _buffer.Length - _readCursor;
                 _readCursor = 0;
                 _readableCount -= wastedLength;
+                _wrapAt = -1;
             }
 
-            int contiguousToEnd = _buffer.Length - _readCursor;
-            int available = Math.Min(_readableCount, contiguousToEnd);
+            // Real data on this lap ends at the padding, if there is any, not at the buffer end.
+            int dataEnd = _wrapAt >= 0 && _readCursor < _wrapAt ? _wrapAt : _buffer.Length;
+            int contiguous = dataEnd - _readCursor;
+            int available = Math.Min(_readableCount, contiguous);
 
             if (available < minFlushSize)
             {

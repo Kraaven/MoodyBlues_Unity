@@ -56,6 +56,18 @@ namespace MoodyBlues
         private bool _sendPumpRunning;
         private bool _sendRequested;
 
+        // The send currently on the socket that has not been released from the buffer yet, and how
+        // many buffered bytes it carries (0 for BeginSession, which bypasses the buffer). Shutdown
+        // needs these: it runs on the main thread and blocks, so the pump's continuation (which
+        // would release the chunk) cannot run until Shutdown returns. Shutdown therefore waits
+        // for this send itself and releases the chunk on the pump's behalf.
+        private Task _inFlightSend;
+        private int _inFlightLength;
+
+        // Set by Shutdown. Tells a pump that resumes afterwards that its chunk has already been
+        // handled and it must not release it again or send anything more.
+        private bool _shuttingDown;
+
         private readonly Uri _webSocketUri;
         private readonly float _captureHz;
         private bool _disposed;
@@ -127,14 +139,18 @@ namespace MoodyBlues
             {
                 var scratch = new byte[Serializer.BeginSessionSize];
                 int size = Serializer.SerializeBeginSession(_captureHz, scratch);
-                await _socket.SendAsync(
+                _inFlightLength = 0; // not from the buffer, so nothing to release
+                _inFlightSend = _socket.SendAsync(
                     new ArraySegment<byte>(scratch, 0, size),
                     WebSocketMessageType.Binary,
                     endOfMessage: true,
                     _socketToken);
+                await _inFlightSend;
+                _inFlightSend = null;
             }
             catch (Exception ex)
             {
+                _inFlightSend = null;
                 Debug.LogWarning($"MoodyBluesStreamer: failed to send BeginSession - {ex.Message}");
                 _sendPumpRunning = false;
                 return false;
@@ -459,11 +475,19 @@ namespace MoodyBlues
 
                     while (TryPrepareNextChunk(out ReadOnlyMemory<byte> chunk))
                     {
-                        if (!IsConnected) return; // finally still clears _sendPumpRunning
-                        await _socket.SendAsync(chunk, WebSocketMessageType.Binary, endOfMessage: true, _socketToken);
+                        if (!IsConnected || _shuttingDown) return; // finally still clears _sendPumpRunning
+                        _inFlightLength = chunk.Length;
+                        _inFlightSend = _socket.SendAsync(chunk, WebSocketMessageType.Binary, endOfMessage: true, _socketToken).AsTask();
+                        await _inFlightSend;
+
+                        // Shutdown ran while this send was on the socket: it has already waited for
+                        // the send and released the chunk, and flushed the rest itself.
+                        if (_shuttingDown) return;
+
+                        _inFlightSend = null;
                         ReleaseChunk(chunk.Length);
                     }
-                } while (_sendRequested);
+                } while (_sendRequested && !_shuttingDown);
             }
             catch (OperationCanceledException) { /* expected on Dispose */ }
             catch (ObjectDisposedException) { /* expected if Dispose ran mid-send */ }
@@ -473,6 +497,7 @@ namespace MoodyBlues
             }
             finally
             {
+                if (!_shuttingDown) _inFlightSend = null;
                 _sendPumpRunning = false;
             }
         }
@@ -546,7 +571,12 @@ namespace MoodyBlues
         {
             try
             {
-                FlushSync();
+                _shuttingDown = true;
+                if (WaitForInFlightSend(closeTimeout))
+                {
+                    FlushSync();
+                }
+
                 CloseSocketBlocking("StopStreaming", closeTimeout);
             }
             catch (Exception ex)
@@ -557,6 +587,48 @@ namespace MoodyBlues
             {
                 SetState(RecordingState.Stopped);
             }
+        }
+
+        /// <summary>
+        /// ClientWebSocket allows one send at a time, so the final flush must not start while the
+        /// pump's send is still on the socket; that collision used to throw and lose everything
+        /// still buffered, EndSession included. Blocks until the in-flight send finishes (or the
+        /// timeout passes), then releases its chunk, because the pump cannot: its continuation is
+        /// queued on this same main thread, which this call is blocking.
+        /// Returns false if the socket is still busy, in which case the final flush is skipped.
+        /// </summary>
+        private bool WaitForInFlightSend(TimeSpan timeout)
+        {
+            Task send = _inFlightSend;
+            if (send == null) return true;
+
+            try
+            {
+                if (!send.Wait(timeout))
+                {
+                    Debug.LogWarning(
+                        "MoodyBluesStreamer: a send was still in progress at shutdown and did not finish in time; " +
+                        "the final flush (including EndSession) was skipped. The backend will mark the session as truncated.");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                // The in-flight send failed, so its chunk was not delivered; leave it buffered and
+                // let FlushSync try again (it will give up quietly if the socket is broken).
+                Debug.LogWarning($"MoodyBluesStreamer: in-flight send failed at shutdown - {ex.GetBaseException().Message}");
+                _inFlightSend = null;
+                return true;
+            }
+
+            if (_inFlightLength > 0)
+            {
+                ReleaseChunk(_inFlightLength);
+            }
+
+            _inFlightSend = null;
+            _inFlightLength = 0;
+            return true;
         }
 
         /// <summary>

@@ -154,7 +154,9 @@ namespace MoodyBlues
 
             // "PrefabName_clone-XXXXXX": the suffix is cosmetic only (ObjectID, not name, drives all
             // tracking/lookup via _liveInstanceIds/_idByTransform), so collisions are harmless.
-            instance.name = $"{prefabs[prefabIndex].name}_clone-{Random.Range(0, 1000000):D6}";
+            // The name comes from the library template, not prefabs[prefabIndex]: a list entry can
+            // be a scene object rather than a prefab asset, and may since have been destroyed.
+            instance.name = $"{_templateInstances[prefabIndex].name}_clone-{Random.Range(0, 1000000):D6}";
             instance.SetActive(startActive);
 
             // RegisterTransform seeds LastSent* from the just-spawned transform, matching what
