@@ -1511,6 +1511,7 @@ GameObject:
   - component: {fileID: 1442346667}
   - component: {fileID: 1442346666}
   - component: {fileID: 1442346668}
+  - component: {fileID: 1442346669}
   m_Layer: 0
   m_Name: MoodyBluesSessionRecorder
   m_TagString: Untagged
@@ -1530,6 +1531,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 39fb0a060d5c0ea449722fd939dc0719, type: 3}
   m_Name: 
   m_EditorClassIdentifier: '::'
+  config: {fileID: 11400000, guid: c516a56bcce143c08e42f0257c1e3cb2, type: 2}
 --- !u!4 &1442346667
 Transform:
   m_ObjectHideFlags: 0
@@ -1559,6 +1561,19 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.MoodyBluesRuntimeManager
   prefabs:
   - {fileID: 1271060147}
+--- !u!114 &1442346669
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1442346665}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9a201fd9b08141369826d965f93bac59, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.SampleSceneController
+  recordingDurationSeconds: 60
 --- !u!1 &1449402109
 GameObject:
   m_ObjectHideFlags: 0

@@ -42,7 +42,7 @@ namespace MoodyBlues.Samples
 
             foreach (GameObject ball in fallenScratch)
             {
-                MoodyBluesRuntimeManager.Instance.DeleteObject(ball);
+                DeleteBall(ball);
             }
 
             // Keep the oldest-first queue limited to balls that still exist.
@@ -57,6 +57,8 @@ namespace MoodyBlues.Samples
         private IEnumerator SpawnBallsRoutine()
         {
             WaitForSeconds wait = new WaitForSeconds(spawnInterval);
+
+            MoodyBluesLog.Warning("Session has Started");
 
             while (true)
             {
@@ -82,19 +84,26 @@ namespace MoodyBlues.Samples
 
                 if (newBall != null)
                 {
+                    MoodyBluesLog.Info($"Ball spawned: {newBall.name}", LogColor.Cyan);
+
                     if (spawnedBalls.Count >= maxBallCount)
                     {
                         GameObject oldestBall = spawnedBalls.Dequeue();
                         if (oldestBall != null)
                         {
-                            //Destroy(oldestBall);
-                            MoodyBluesRuntimeManager.Instance.DeleteObject(oldestBall);
+                            DeleteBall(oldestBall);
                         }
                     }
 
                     spawnedBalls.Enqueue(newBall);
                 }
             }
+        }
+
+        private static void DeleteBall(GameObject ball)
+        {
+            MoodyBluesLog.Info($"Ball deleted: {ball.name}", LogColor.Orange);
+            MoodyBluesRuntimeManager.Instance.DeleteObject(ball);
         }
     }
 }

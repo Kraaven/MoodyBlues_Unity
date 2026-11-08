@@ -1,28 +1,42 @@
 using GLTF.Schema;
-using Newtonsoft.Json.Linq;
 using UnityEngine;
 using UnityGLTF;
+using UnityGLTF.Plugins;
 
 namespace MoodyBlues
 {
     /// <summary>
-    /// Writes each tracked object's ObjectID into node.Extras.objectId during glTF export (see
-    /// Spec.md Section 9) so the backend can key scene geometry back to wire-protocol ObjectIDs.
-    /// Wired up directly on the ExportContext.AfterNodeExport delegate (see SceneGltfExporter)
-    /// rather than through the Project Settings > UnityGLTF plugin list, so no per-project manual
-    /// enabling step is needed for this to work.
+    /// UnityGLTF export plugin behind <see cref="SceneGltfExporter"/> (see Spec.md Section 9). During
+    /// a MoodyBlues export it:
+    /// - leaves out every transform without an ObjectID (ShouldNodeExport);
+    /// - writes each node's ObjectID and MoodyBlues metadata into node.extras, so the backend can
+    ///   key scene geometry back to wire-protocol ObjectIDs;
+    /// - applies the export's pose overrides and drops meshes that cannot be exported.
+    ///
+    /// UnityGLTF registers every export plugin it finds into its settings, so this also appears in
+    /// Project Settings > UnityGLTF. Outside a MoodyBlues export it does nothing.
     /// </summary>
-    public static class ObjectIdExportPlugin
+    public class ObjectIdExportPlugin : GLTFExportPlugin
     {
-        public static void AfterNodeExport(GLTFSceneExporter exporter, GLTFRoot gltfRoot, Transform transform, Node node)
+        public override string DisplayName => "MoodyBlues ObjectIDs";
+
+        public override string Description =>
+            "Used by MoodyBlues scene exports only: writes ObjectIDs into node extras. Has no effect on other exports.";
+
+        public override GLTFExportPluginContext CreateInstance(ExportContext context) => new Context();
+
+        private sealed class Context : GLTFExportPluginContext
         {
-            if (MoodyBluesSessionManager.Instance == null) return;
-            if (!MoodyBluesSessionManager.Instance.TryGetIdForTransform(transform, out ushort objectId)) return;
+            public override bool ShouldNodeExport(GLTFSceneExporter exporter, GLTFRoot gltfRoot, Transform transform)
+            {
+                SceneGltfExporter.ExportJob job = SceneGltfExporter.Current;
+                return job == null || job.ShouldExport(transform);
+            }
 
-            var UserData = new JObject { ["objectId"] = objectId };
-            MoodyBluesSessionManager.PopulateObjectUserData(transform, UserData);
-
-            node.Extras = UserData;
+            public override void AfterNodeExport(GLTFSceneExporter exporter, GLTFRoot gltfRoot, Transform transform, Node node)
+            {
+                SceneGltfExporter.Current?.AfterNodeExport(transform, node);
+            }
         }
     }
 }

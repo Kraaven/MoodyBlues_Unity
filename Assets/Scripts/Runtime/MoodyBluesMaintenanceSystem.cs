@@ -33,10 +33,17 @@ namespace MoodyBlues
 
         private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
 
+        /// <summary>
+        /// Budget for <see cref="EndAsync"/>. Longer than CloseTimeout because nothing is blocked
+        /// while it runs, and a full buffer on a slow headset connection can take a few seconds.
+        /// </summary>
+        private static readonly TimeSpan AsyncStopTimeout = TimeSpan.FromSeconds(10);
+
         private readonly MoodyBluesStreamer _streamer;
 
         private double _keepAliveAccumulator;
         private bool _ended;
+        private bool _stopping;
         private bool _reconnecting;
         private int _reconnectAttempt;
 
@@ -47,18 +54,50 @@ namespace MoodyBlues
             _streamer = streamer;
         }
 
-        /// <summary>Opens the connection. BeginSession is emitted by the streamer on success.</summary>
-        public async void StartAsync()
+        /// <summary>
+        /// Opens the connection, retrying with backoff until <paramref name="deadlineUtc"/>. If no
+        /// attempt succeeds by then the streamer is marked Failed, which MoodyBluesSessionManager
+        /// treats as a failed start. BeginSession is emitted by the streamer on success.
+        /// </summary>
+        public async void StartAsync(DateTime deadlineUtc)
         {
             // async void: nothing awaits session startup, so the body is fully wrapped.
+            // _reconnecting is held for the whole loop so Tick's reconnect path stays out of it.
+            if (_reconnecting || _ended) return;
+            _reconnecting = true;
+
             try
             {
-                if (await _streamer.ConnectAsync()) return;
-                BeginReconnect();
+                int attempt = 0;
+                while (!_ended)
+                {
+                    if (await _streamer.ConnectAsync()) return;
+                    if (_ended) return;
+
+                    int delay = ReconnectBackoffMillis[Math.Min(attempt, ReconnectBackoffMillis.Length - 1)];
+                    attempt++;
+
+                    if (DateTime.UtcNow + TimeSpan.FromMilliseconds(delay) >= deadlineUtc)
+                    {
+                        _streamer.NotifyFailed();
+                        Debug.LogError(
+                            "MoodyBluesMaintenanceSystem: could not connect to the backend within the start " +
+                            "timeout. This recording was not started.");
+                        return;
+                    }
+
+                    Debug.LogWarning($"MoodyBluesMaintenanceSystem: connect attempt {attempt} failed, retrying in {delay}ms.");
+                    await Task.Delay(delay);
+                }
             }
             catch (Exception ex)
             {
                 Debug.LogError($"MoodyBluesMaintenanceSystem: failed to start the session - {ex}");
+                if (!_ended) _streamer.NotifyFailed();
+            }
+            finally
+            {
+                _reconnecting = false;
             }
         }
 
@@ -125,6 +164,69 @@ namespace MoodyBlues
             _streamer.Dispose();
         }
 
+        /// <summary>
+        /// Non-blocking <see cref="End"/>. Resolves to true only if EndSession was written,
+        /// everything buffered was sent, and the server acknowledged the close.
+        ///
+        /// If the connection is down and being re-established, this waits for the reconnect (or
+        /// starts one) before writing EndSession, all within <see cref="AsyncStopTimeout"/>.
+        /// Writing EndSession later is safe: the caller detaches this streamer as soon as the call
+        /// returns, so nothing else is written into it after this point.
+        /// </summary>
+        public async Task<bool> EndAsync(Serializer.SessionEndReason reason, long deltaPromotions, long rotationWidenings, long hardClamps)
+        {
+            if (_ended || _stopping) return false;
+            _stopping = true;
+
+            DateTime deadlineUtc = DateTime.UtcNow + AsyncStopTimeout;
+            bool wroteEndSession = false;
+            try
+            {
+                if (!_streamer.IsConnected && _streamer.State != RecordingState.Failed)
+                {
+                    BeginReconnect(); // no-op if a reconnect is already running
+                    while (!_streamer.IsConnected && _streamer.State != RecordingState.Failed && DateTime.UtcNow < deadlineUtc)
+                    {
+                        await Task.Delay(100);
+                    }
+                }
+
+                // From here on the reconnect loop and Tick stand down.
+                _ended = true;
+
+                if (_streamer.IsConnected)
+                {
+                    _streamer.EnqueueEndSession(reason, deltaPromotions, rotationWidenings, hardClamps);
+                    wroteEndSession = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _ended = true;
+                Debug.LogWarning($"MoodyBluesMaintenanceSystem: could not write EndSession - {ex.Message}");
+            }
+
+            try
+            {
+                TimeSpan remaining = deadlineUtc - DateTime.UtcNow;
+                if (remaining < CloseTimeout) remaining = CloseTimeout;
+                bool delivered = await _streamer.ShutdownAsync(remaining);
+                return delivered && wroteEndSession;
+            }
+            finally
+            {
+                _streamer.Dispose();
+            }
+        }
+
+        /// <summary>Tears the connection down without EndSession, for a start that never completed.</summary>
+        public void Abort()
+        {
+            if (_ended) return;
+            _ended = true;
+            _streamer.Dispose();
+        }
+
         private async void BeginReconnect()
         {
             // async void: fire-and-forget retry loop, fully wrapped.
@@ -157,14 +259,9 @@ namespace MoodyBlues
                 if (!_ended)
                 {
                     _streamer.NotifyFailed();
-
-                    // The receiver's handshake token is single-use, so a reconnect currently needs
-                    // a matching backend change (a resumable session) before it can succeed. Said
-                    // plainly here rather than left as a silent retry failure.
                     Debug.LogError(
-                        "MoodyBluesMaintenanceSystem: gave up reconnecting. Recording has stopped for this run. " +
-                        "Note that resuming a dropped connection also requires backend support for reclaiming a " +
-                        "handshake session token, which is not in place yet.");
+                        "MoodyBluesMaintenanceSystem: gave up reconnecting. Recording has stopped for this run; " +
+                        "the backend keeps what it received and marks the session as truncated.");
                 }
             }
             catch (Exception ex)

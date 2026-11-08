@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Net.WebSockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -35,8 +36,17 @@ namespace MoodyBlues
     /// </summary>
     public sealed class MoodyBluesStreamer : IDisposable
     {
-        private const int RingBufferCapacity = 24 * 1024;
-        private const int PacketSize = 8 * 1024;
+        // At least 256 KB, enough for the start-of-recording snapshot of roughly 13k changed
+        // objects while the socket is still connecting, and at least four messages, so a full
+        // message can be sending while the next ones fill. Larger snapshots fall back to the
+        // overflow path in TryReserve.
+        private const int MinRingBufferCapacity = 256 * 1024;
+        private const int RingBufferMessages = 4;
+
+        /// <summary>Default message size, used when no config is given.</summary>
+        public const int DefaultPacketSize = 8 * 1024;
+
+        private readonly int PacketSize;
 
         private ClientWebSocket _socket;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
@@ -45,7 +55,7 @@ namespace MoodyBlues
         // Only used to receive control frames (Ping/Close), never application data -- see ReceiveLoopAsync.
         private readonly byte[] _receiveScratch = new byte[256];
 
-        private readonly RingBufferAccumulator _accumulator = new RingBufferAccumulator(RingBufferCapacity);
+        private readonly RingBufferAccumulator _accumulator;
 
         // Sizes of events committed into _accumulator, in commit order, not yet released -- lets a
         // flush cut a WebSocket message at an exact event boundary rather than an arbitrary byte offset.
@@ -86,10 +96,12 @@ namespace MoodyBlues
 
         public bool IsConnected => _socket != null && _socket.State == WebSocketState.Open;
 
-        public MoodyBluesStreamer(Uri webSocketUri, float captureHz)
+        public MoodyBluesStreamer(Uri webSocketUri, float captureHz, int packetSize = DefaultPacketSize)
         {
             _webSocketUri = webSocketUri;
             _captureHz = captureHz;
+            PacketSize = Math.Max(1024, packetSize);
+            _accumulator = new RingBufferAccumulator(Math.Max(MinRingBufferCapacity, PacketSize * RingBufferMessages));
         }
 
         private void SetState(RecordingState state)
@@ -187,7 +199,8 @@ namespace MoodyBlues
                         Debug.Log("MoodyBluesStreamer: server closed the connection.");
                         return;
                     }
-                    // Any real payload is unexpected on this send-only stream -- discard it.
+                    // The server sends a one-byte KeepAlive every few seconds so proxies (Cloudflare)
+                    // see traffic from the origin side; nothing else is expected. Discard it all.
                 }
             }
             catch (OperationCanceledException) { /* expected on Dispose */ }
@@ -228,39 +241,41 @@ namespace MoodyBlues
         /// Lifecycle events can be triggered from anywhere (not just the capture tick), so unlike
         /// per-tick transform deltas they can't assume a nearby TimeStamp is still accurate -- each
         /// EnqueueXxx lifecycle method stamps its own current time immediately before its event.
+        /// The start-of-recording snapshot passes stampTime: false, because it writes one TimeStamp
+        /// for the whole batch.
         /// </summary>
-        private void EnqueueTimeStampForLifecycleEvent()
+        private void EnqueueTimeStampForLifecycleEvent(bool stampTime)
         {
-            EnqueueTimeStamp(Time.timeAsDouble);
+            if (stampTime) EnqueueTimeStamp(Time.timeAsDouble);
         }
 
-        public void EnqueueShowObject(ushort objectId)
+        public void EnqueueShowObject(ushort objectId, bool stampTime = true)
         {
-            EnqueueTimeStampForLifecycleEvent();
+            EnqueueTimeStampForLifecycleEvent(stampTime);
             Span<byte> scratch = stackalloc byte[Serializer.ShowObjectSize];
             Serializer.SerializeShowObject(objectId, scratch);
             WriteToAccumulator(scratch);
         }
 
-        public void EnqueueHideObject(ushort objectId)
+        public void EnqueueHideObject(ushort objectId, bool stampTime = true)
         {
-            EnqueueTimeStampForLifecycleEvent();
+            EnqueueTimeStampForLifecycleEvent(stampTime);
             Span<byte> scratch = stackalloc byte[Serializer.HideObjectSize];
             Serializer.SerializeHideObject(objectId, scratch);
             WriteToAccumulator(scratch);
         }
 
-        public void EnqueueDeleteObject(ushort objectId)
+        public void EnqueueDeleteObject(ushort objectId, bool stampTime = true)
         {
-            EnqueueTimeStampForLifecycleEvent();
+            EnqueueTimeStampForLifecycleEvent(stampTime);
             Span<byte> scratch = stackalloc byte[Serializer.DeleteObjectSize];
             Serializer.SerializeDeleteObject(objectId, scratch);
             WriteToAccumulator(scratch);
         }
 
-        public void EnqueueInstantiateObject(ushort newObjectId, ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale)
+        public void EnqueueInstantiateObject(ushort newObjectId, ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale, bool stampTime = true)
         {
-            EnqueueTimeStampForLifecycleEvent();
+            EnqueueTimeStampForLifecycleEvent(stampTime);
             Span<byte> scratch = stackalloc byte[Serializer.InstantiateObjectSize];
             Serializer.SerializeInstantiateObject(newObjectId, templateObjectId, parentObjectId, position, rotation, scale, scratch);
             WriteToAccumulator(scratch);
@@ -276,9 +291,10 @@ namespace MoodyBlues
             ushort newParentObjectId,
             Vector3 localPosition,
             Quaternion localRotation,
-            Vector3 localScale)
+            Vector3 localScale,
+            bool stampTime = true)
         {
-            EnqueueTimeStampForLifecycleEvent();
+            EnqueueTimeStampForLifecycleEvent(stampTime);
 
             Span<byte> scratch = stackalloc byte[Serializer.ReparentObjectSize];
             int size = Serializer.SerializeReparentObject(
@@ -327,6 +343,46 @@ namespace MoodyBlues
 
         private static uint Saturate(long value) =>
             value <= 0 ? 0u : value >= uint.MaxValue ? uint.MaxValue : (uint)value;
+
+        /// <summary>
+        /// Writes a developer log as one TimeStamp followed by as many 35-byte Log events as the
+        /// text needs. The first event carries the level and colour; the rest carry style 0, which
+        /// tells the receiver to append them to the previous log. Text is split on UTF-8 character
+        /// boundaries so no event ends mid-character.
+        /// </summary>
+        public void EnqueueLog(LogLevel level, LogColor color, string message)
+        {
+            message ??= string.Empty;
+
+            // A zero byte ends a Log event's text on the receiver, so one inside the message would
+            // silently cut it short.
+            if (message.IndexOf('\0') >= 0) message = message.Replace("\0", string.Empty);
+
+            byte[] utf8 = Encoding.UTF8.GetBytes(message);
+            int length = BackToCharBoundary(utf8, Math.Min(utf8.Length, MoodyBluesLog.MaxMessageBytes));
+
+            EnqueueTimeStamp(Time.timeAsDouble);
+
+            byte style = MoodyBluesLog.PackStyle(level, color);
+            Span<byte> scratch = stackalloc byte[Serializer.LogSize];
+            int offset = 0;
+            do
+            {
+                int end = BackToCharBoundary(utf8, Math.Min(offset + Serializer.LogTextBytes, length));
+                Serializer.SerializeLog(style, new ReadOnlySpan<byte>(utf8, offset, end - offset), scratch);
+                WriteToAccumulator(scratch);
+
+                style = 0; // continuation
+                offset = end;
+            } while (offset < length);
+        }
+
+        /// <summary>Moves <paramref name="end"/> back so it doesn't split a multi-byte UTF-8 character.</summary>
+        private static int BackToCharBoundary(byte[] utf8, int end)
+        {
+            while (end > 0 && end < utf8.Length && (utf8[end] & 0xC0) == 0x80) end--;
+            return end;
+        }
 
         private void WriteToAccumulator(ReadOnlySpan<byte> bytes)
         {
@@ -464,7 +520,7 @@ namespace MoodyBlues
                 return;
             }
 
-            if (!IsConnected) return;
+            if (!IsConnected || _shuttingDown) return;
 
             _sendPumpRunning = true;
             try
@@ -587,6 +643,106 @@ namespace MoodyBlues
             {
                 SetState(RecordingState.Stopped);
             }
+        }
+
+        /// <summary>
+        /// Non-blocking counterpart of <see cref="Shutdown"/>, used by
+        /// MoodyBluesSessionManager.StopRecording so stopping never freezes the game. Waits for any
+        /// in-flight send, sends everything still buffered, then performs the WebSocket close
+        /// handshake. Returns true only if every buffered byte was sent and the server acknowledged
+        /// the close; the backend acknowledges only after it has stored every earlier message.
+        /// </summary>
+        public async Task<bool> ShutdownAsync(TimeSpan timeout)
+        {
+            DateTime deadline = DateTime.UtcNow + timeout;
+            try
+            {
+                _shuttingDown = true;
+
+                if (!await WaitForInFlightSendAsync(timeout)) return false;
+                if (!await FlushAsync(deadline)) return false;
+                return await CloseSocketAsync("StopRecording", deadline);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"MoodyBluesStreamer: shutdown error - {ex.GetBaseException().Message}");
+                return false;
+            }
+            finally
+            {
+                SetState(RecordingState.Stopped);
+            }
+        }
+
+        /// <summary>
+        /// Async form of <see cref="WaitForInFlightSend"/>. Releases the in-flight chunk on the
+        /// pump's behalf, because once _shuttingDown is set the pump returns without releasing it.
+        /// </summary>
+        private async Task<bool> WaitForInFlightSendAsync(TimeSpan timeout)
+        {
+            Task send = _inFlightSend;
+            if (send == null) return true;
+
+            if (await Task.WhenAny(send, Task.Delay(timeout)) != send)
+            {
+                Debug.LogWarning(
+                    "MoodyBluesStreamer: a send was still in progress at shutdown and did not finish in time; " +
+                    "the final flush (including EndSession) was skipped. The backend will mark the session as truncated.");
+                return false;
+            }
+
+            if (send.IsFaulted || send.IsCanceled)
+            {
+                // Not delivered, so its chunk stays buffered for FlushAsync to retry.
+                _inFlightSend = null;
+                return true;
+            }
+
+            if (_inFlightLength > 0) ReleaseChunk(_inFlightLength);
+            _inFlightSend = null;
+            _inFlightLength = 0;
+            return true;
+        }
+
+        private async Task<bool> FlushAsync(DateTime deadline)
+        {
+            while (TryPrepareNextChunk(out ReadOnlyMemory<byte> chunk))
+            {
+                if (!IsConnected) return false;
+
+                TimeSpan remaining = deadline - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero) return TimedOut("final flush");
+
+                Task send = _socket.SendAsync(chunk, WebSocketMessageType.Binary, endOfMessage: true, _socketToken).AsTask();
+                if (await Task.WhenAny(send, Task.Delay(remaining)) != send) return TimedOut("final flush");
+                await send; // rethrows a failed send; ShutdownAsync reports it
+
+                ReleaseChunk(chunk.Length);
+            }
+
+            return true;
+        }
+
+        private async Task<bool> CloseSocketAsync(string reason, DateTime deadline)
+        {
+            if (_socket == null) return false;
+            if (_socket.State != WebSocketState.Open && _socket.State != WebSocketState.CloseReceived) return false;
+
+            TimeSpan remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero) return TimedOut("close handshake");
+
+            Task close = _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, reason, _socketToken);
+            if (await Task.WhenAny(close, Task.Delay(remaining)) != close) return TimedOut("close handshake");
+            await close;
+            return true;
+        }
+
+        private static bool TimedOut(string step)
+        {
+            Debug.LogWarning(
+                $"MoodyBluesStreamer: {step} timed out while stopping. The backend's inactivity timeout " +
+                "will finalize the session instead.");
+            return false;
         }
 
         /// <summary>

@@ -12,5 +12,14 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9e756fb9f0a1450789eef05bf350e285, type: 3}
   m_Name: MoodyBluesClientConfig
   m_EditorClassIdentifier: 
-  developerId: znY9TNYa0Mn8aSfb
+  developerId: IhppEHA3yFBRlYRi
   backendBaseUrl: https://moodyblues.kraaven.net
+  recordingEnabled: 1
+  recordingMode: 1
+  positionRange: 500
+  scaleMin: -1
+  scaleMax: 10
+  deltaPositionRange: 1.5
+  deltaRotationComponentRange: 0.5
+  deltaSingleAxisAngleRange: 2
+  deltaScaleRange: 1

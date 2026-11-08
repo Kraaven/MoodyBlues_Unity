@@ -23,4 +23,23 @@ namespace MoodyBlues
         public bool sceneUploadRequired;
         public string sceneUploadUrl;
     }
+
+    /// <summary>
+    /// POST /scenes/check (Spec.md Section 13). Asks whether the backend holds an export matching
+    /// this scene hash, without starting a session.
+    /// </summary>
+    [Serializable]
+    public class SceneCheckRequest
+    {
+        public string developerId;
+        public string sceneId;
+        public string sceneHash;
+    }
+
+    [Serializable]
+    public class SceneCheckResponse
+    {
+        public bool sceneUploadRequired;
+        public string sceneUploadUrl;
+    }
 }

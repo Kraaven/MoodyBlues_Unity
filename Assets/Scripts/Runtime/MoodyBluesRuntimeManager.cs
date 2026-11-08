@@ -36,6 +36,43 @@ namespace MoodyBlues
         // back to its ObjectID.
         private readonly Dictionary<GameObject, ushort> _liveInstanceIds = new();
 
+        // Spawned ObjectID -> the template ObjectID it was cloned from. The start-of-recording
+        // snapshot needs it to re-describe spawns that happened while nothing was recording.
+        private readonly Dictionary<ushort, ushort> _templateIdBySpawnId = new();
+
+        /// <summary>One node of a template's subtree, in walk order, as a clone's matching child starts.</summary>
+        public readonly struct TemplateNode
+        {
+            public readonly string Name;
+            public readonly int ChildCount;
+
+            /// <summary>Walk index of this node's parent within the subtree; -1 for the root.</summary>
+            public readonly int ParentIndex;
+            public readonly Vector3 Position;
+            public readonly Quaternion Rotation;
+            public readonly Vector3 Scale;
+            public readonly bool ActiveSelf;
+
+            public TemplateNode(string name, int childCount, int parentIndex, Vector3 position, Quaternion rotation, Vector3 scale, bool activeSelf)
+            {
+                Name = name;
+                ChildCount = childCount;
+                ParentIndex = parentIndex;
+                Position = position;
+                Rotation = rotation;
+                Scale = scale;
+                ActiveSelf = activeSelf;
+            }
+        }
+
+        // Prefab index -> the template's subtree (root first). Filled in Start, once IDs exist.
+        private readonly Dictionary<int, TemplateNode[]> _templateNodesByPrefabIndex = new();
+
+        // Spawned root ObjectID -> its prefab index, and the IDs of its registered children
+        // (root + 1 ...). Only for spawns whose whole subtree was registered.
+        private readonly Dictionary<ushort, (int PrefabIndex, int ChildCount)> _spawnSubtrees = new();
+        private readonly HashSet<ushort> _spawnPartIds = new();
+
         // Reused by DeleteObject's subtree walk so a delete allocates nothing.
         private readonly List<ushort> _deleteFrontierScratch = new();
         private readonly List<ushort> _deleteSubtreeIdsScratch = new();
@@ -54,9 +91,7 @@ namespace MoodyBlues
         {
             Instance = this;
 
-            _libraryRoot = new GameObject("PrefabInstanceLibrary");
-            _libraryRoot.transform.SetParent(transform, worldPositionStays: false);
-            _libraryRoot.SetActive(false);
+            _libraryRoot = BuildTemplateLibrary(transform, prefabs, _templateInstances);
 
             for (int i = 0; i < prefabs.Count; i++)
             {
@@ -64,13 +99,8 @@ namespace MoodyBlues
                 if (prefab == null)
                 {
                     Debug.LogWarning($"MoodyBluesRuntimeManager: prefab slot {i} is empty, skipping.");
-                    _templateInstances.Add(null);
                     continue;
                 }
-
-                GameObject template = Instantiate(prefab, _libraryRoot.transform);
-                template.name = prefab.name;
-                _templateInstances.Add(template);
 
                 if (!_templateIndexByName.TryAdd(prefab.name, i))
                 {
@@ -81,6 +111,41 @@ namespace MoodyBlues
                 }
             }
         }
+
+        /// <summary>The configured prefab list, for the editor-side scene export.</summary>
+        public IReadOnlyList<GameObject> Prefabs => prefabs;
+
+        /// <summary>
+        /// Creates the inactive <c>PrefabInstanceLibrary</c> under <paramref name="owner"/> with one
+        /// template per prefab, exactly as the running game does in Awake. The editor-side scene
+        /// export calls this too, so a scene exported at build time has its templates in the same
+        /// place, and therefore the same ObjectIDs, as the running game. <paramref name="templates"/>
+        /// receives one entry per prefab slot (null for empty slots), keeping indices aligned.
+        /// </summary>
+        public static GameObject BuildTemplateLibrary(Transform owner, IReadOnlyList<GameObject> prefabs, List<GameObject> templates)
+        {
+            var libraryRoot = new GameObject(LibraryRootName);
+            libraryRoot.transform.SetParent(owner, worldPositionStays: false);
+            libraryRoot.SetActive(false);
+
+            for (int i = 0; i < prefabs.Count; i++)
+            {
+                GameObject prefab = prefabs[i];
+                if (prefab == null)
+                {
+                    templates.Add(null);
+                    continue;
+                }
+
+                GameObject template = Instantiate(prefab, libraryRoot.transform);
+                template.name = prefab.name;
+                templates.Add(template);
+            }
+
+            return libraryRoot;
+        }
+
+        public const string LibraryRootName = "PrefabInstanceLibrary";
 
         private void Start()
         {
@@ -100,10 +165,27 @@ namespace MoodyBlues
                 if (Session.TryGetIdForTransform(template.transform, out ushort id))
                 {
                     _templateObjectIdByPrefabIndex[i] = id;
+
+                    // The template's subtree in walk order, with each node's pose: a clone's children
+                    // map onto it by position, and a receiver assumes these poses for them.
+                    var nodes = new List<Transform>();
+                    SceneWalk.CollectSubtree(template.transform, nodes);
+                    var indexOf = new Dictionary<Transform, int>(nodes.Count);
+                    for (int n = 0; n < nodes.Count; n++) indexOf[nodes[n]] = n;
+
+                    var poses = new TemplateNode[nodes.Count];
+                    for (int n = 0; n < nodes.Count; n++)
+                    {
+                        Transform node = nodes[n];
+                        int parentIndex = n > 0 && indexOf.TryGetValue(node.parent, out int p) ? p : -1;
+                        poses[n] = new TemplateNode(node.name, node.childCount, parentIndex, node.localPosition, node.localRotation, node.localScale, node.gameObject.activeSelf);
+                    }
+
+                    _templateNodesByPrefabIndex[i] = poses;
                 }
                 else
                 {
-                    Debug.LogError($"MoodyBluesRuntimeManager: template for prefab '{prefabs[i].name}' (index {i}) was never assigned an ObjectID -- was it static, or removed from the hierarchy before MoodyBluesSessionManager's walk?");
+                    Debug.LogError($"MoodyBluesRuntimeManager: template for prefab '{prefabs[i].name}' (index {i}) was never assigned an ObjectID -- was it removed from the hierarchy before MoodyBluesSessionManager's walk?");
                 }
             }
         }
@@ -150,7 +232,7 @@ namespace MoodyBlues
 
             GameObject instance = Instantiate(_templateInstances[prefabIndex], position, rotation);
             instance.transform.localScale = scale;
-            if (parent != null && !parent.gameObject.isStatic) instance.transform.SetParent(parent);
+            if (parent != null) instance.transform.SetParent(parent);
 
             // "PrefabName_clone-XXXXXX": the suffix is cosmetic only (ObjectID, not name, drives all
             // tracking/lookup via _liveInstanceIds/_idByTransform), so collisions are harmless.
@@ -159,31 +241,50 @@ namespace MoodyBlues
             instance.name = $"{_templateInstances[prefabIndex].name}_clone-{Random.Range(0, 1000000):D6}";
             instance.SetActive(startActive);
 
-            // RegisterTransform seeds LastSent* from the just-spawned transform, matching what
-            // the InstantiateObject event below already carries -- so the capture tick won't
-            // redundantly re-send it.
-            ushort newObjectId = Session.RegisterTransform(instance.transform);
+            // The whole clone is tracked: root and every descendant, as one block of consecutive
+            // IDs in walk order. A receiver maps that block onto the template's subtree by
+            // position, so the clone has to have the template's structure; if a script changed it
+            // (in Awake, say) only the root is tracked.
+            _templateNodesByPrefabIndex.TryGetValue(prefabIndex, out TemplateNode[] templateNodes);
+            var cloneNodes = new List<Transform>();
+            SceneWalk.CollectSubtree(instance.transform, cloneNodes);
+            bool sameStructure = templateNodes != null && MatchesTemplate(cloneNodes, templateNodes);
+            if (!sameStructure && cloneNodes.Count > 1)
+            {
+                Debug.LogError(
+                    $"MoodyBluesRuntimeManager.InstantiateObject: '{instance.name}' does not have the same hierarchy " +
+                    $"as its template '{_templateInstances[prefabIndex].name}' (something added or removed children while " +
+                    "it was created). Only its root is recorded; its children will not move in the replay.");
+                cloneNodes.RemoveRange(1, cloneNodes.Count - 1);
+            }
+
+            // RegisterSubtree seeds each LastSent* from the just-spawned transform, matching what
+            // the events below carry -- so the capture tick won't redundantly re-send them.
+            ushort newObjectId = Session.RegisterSubtree(cloneNodes);
             if (newObjectId == 0)
             {
-                // ID space exhausted (RegisterTransform already logged it). The spawn stands --
-                // breaking gameplay because the recorder ran out of identifiers would be a far
-                // worse failure than an incomplete recording -- it just isn't tracked.
+                // ID space exhausted (already logged). The spawn stands -- breaking gameplay because
+                // the recorder ran out of identifiers would be a far worse failure than an
+                // incomplete recording -- it just isn't tracked.
                 return instance;
             }
 
             _liveInstanceIds[instance] = newObjectId;
-
-            if (Streamer == null)
+            _templateIdBySpawnId[newObjectId] = templateObjectId;
+            if (cloneNodes.Count > 1)
             {
-                // Handshake hasn't completed yet -- spawn proceeds locally, but there's no socket to
-                // report it on. LastSent* above is already seeded from this spawn, so nothing's lost.
-                Debug.LogWarning($"MoodyBluesRuntimeManager.InstantiateObject: spawned '{instance.name}' before the handshake completed, no event emitted.");
-                return instance;
+                _spawnSubtrees[newObjectId] = (prefabIndex, cloneNodes.Count - 1);
+                for (int i = 1; i < cloneNodes.Count; i++)
+                {
+                    _spawnPartIds.Add((ushort)(newObjectId + i));
+                }
             }
 
-            // 0 means "scene root" -- which is also the right answer when the requested parent is
-            // untracked (e.g. a static parent, which the scene walk skips), since in that case the
-            // SetParent above was skipped too and the instance really is at the root.
+            // Not recording: the spawn proceeds locally and is described by the next recording's
+            // start-of-recording snapshot instead, which is why it is remembered above.
+            if (Streamer == null) return instance;
+
+            // 0 means "scene root" -- also what is sent when the requested parent is untracked.
             ushort parentObjectId = 0;
             if (parent != null)
             {
@@ -200,11 +301,61 @@ namespace MoodyBlues
 
             if (!startActive)
             {
-                Streamer.EnqueueHideObject(newObjectId);
+                Streamer.EnqueueHideObject(newObjectId, stampTime: false);
             }
 
+            DescribeSpawnParts(Streamer, newObjectId);
             return instance;
         }
+
+        private static bool MatchesTemplate(List<Transform> cloneNodes, TemplateNode[] templateNodes)
+        {
+            if (cloneNodes.Count != templateNodes.Length) return false;
+            for (int i = 0; i < cloneNodes.Count; i++)
+            {
+                // The root is renamed on spawn, so only its child count is compared.
+                if (cloneNodes[i].childCount != templateNodes[i].ChildCount) return false;
+                if (i > 0 && cloneNodes[i].name != templateNodes[i].Name) return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Right after a spawn's InstantiateObject (sharing its TimeStamp): the receiver assumes each
+        /// clone child starts exactly like its template node. For any child that does not (a script
+        /// moved or toggled it while the clone was created), sends its real pose and visibility.
+        /// Used by the live spawn and by the start-of-recording snapshot.
+        /// </summary>
+        public void DescribeSpawnParts(MoodyBluesStreamer streamer, ushort rootId)
+        {
+            if (!TryGetSpawnSubtree(rootId, out TemplateNode[] nodes)) return;
+
+            for (int i = 1; i < nodes.Length; i++)
+            {
+                var id = (ushort)(rootId + i);
+                TemplateNode node = nodes[i];
+                Session.SendSpawnPoseIfDifferent(streamer, id, node.Position, node.Rotation, node.Scale);
+
+                if (Session.TryGetTransform(id, out Transform t) && t.gameObject.activeSelf != node.ActiveSelf)
+                {
+                    if (t.gameObject.activeSelf) streamer.EnqueueShowObject(id, stampTime: false);
+                    else streamer.EnqueueHideObject(id, stampTime: false);
+                }
+            }
+        }
+
+        /// <summary>A spawned root's template subtree (root first; child k has ObjectID root + k).</summary>
+        public bool TryGetSpawnSubtree(ushort rootId, out TemplateNode[] nodes)
+        {
+            nodes = null;
+            return _spawnSubtrees.TryGetValue(rootId, out var subtree) &&
+                   _templateNodesByPrefabIndex.TryGetValue(subtree.PrefabIndex, out nodes) &&
+                   nodes.Length == subtree.ChildCount + 1;
+        }
+
+        /// <summary>True for the children of spawned objects; they are introduced by their root's InstantiateObject.</summary>
+        public bool IsSpawnPart(ushort id) => _spawnPartIds.Contains(id);
 
         /// <summary>
         /// Permanently destroys a tracked object and everything beneath it.
@@ -252,15 +403,14 @@ namespace MoodyBlues
                     Streamer.EnqueueDeleteObject(id);
                 }
             }
-            else
-            {
-                Debug.LogWarning($"MoodyBluesRuntimeManager.DeleteObject: destroyed '{go.name}' before the handshake completed, no event emitted.");
-            }
 
             for (int i = 0; i < _deleteSubtreeIdsScratch.Count; i++)
             {
                 Transform t = _deleteSubtreeTransformsScratch[i];
                 if (t != null) _liveInstanceIds.Remove(t.gameObject);
+                _templateIdBySpawnId.Remove(_deleteSubtreeIdsScratch[i]);
+                _spawnSubtrees.Remove(_deleteSubtreeIdsScratch[i]);
+                _spawnPartIds.Remove(_deleteSubtreeIdsScratch[i]);
                 Session.UnregisterObject(_deleteSubtreeIdsScratch[i]);
             }
 
@@ -272,9 +422,9 @@ namespace MoodyBlues
         /// no tracked ancestor inside this subtree.
         ///
         /// Traversal is driven by the transform hierarchy rather than by what is tracked, because
-        /// an *untracked* parent can own tracked children -- a static parent with moving children
-        /// is exactly the shape the initial scene walk produces (it skips static objects but
-        /// recurses into them). Keying off tracked nodes alone would miss those entirely.
+        /// an *untracked* parent can own tracked children (for example a clone whose structure did
+        /// not match its template, so only its root is tracked). Keying off tracked nodes alone
+        /// would miss them.
         /// </summary>
         private static void CollectTrackedSubtree(
             Transform t,
@@ -330,15 +480,6 @@ namespace MoodyBlues
                 return;
             }
 
-            if (newParent != null && newParent.gameObject.isStatic)
-            {
-                // Static objects are never tracked (the scene walk skips them), so there is no id
-                // to report. Same outcome as InstantiateObject's handling of a static parent.
-                Debug.LogWarning(
-                    $"MoodyBluesRuntimeManager.SetObjectParent: '{newParent.name}' is static and therefore " +
-                    $"untracked, so '{go.name}' will be reported as parented to the scene root.");
-            }
-
             go.transform.SetParent(newParent, worldPositionStays);
 
             ushort parentObjectId = 0;
@@ -347,11 +488,7 @@ namespace MoodyBlues
                 TryGetObjectId(newParent.gameObject, out parentObjectId);
             }
 
-            if (Streamer == null)
-            {
-                Debug.LogWarning($"MoodyBluesRuntimeManager.SetObjectParent: reparented '{go.name}' before the handshake completed, no event emitted.");
-                return;
-            }
+            if (Streamer == null) return; // not recording; the next snapshot carries the new parent
 
             Session.EmitReparent(id, parentObjectId);
         }
@@ -378,11 +515,7 @@ namespace MoodyBlues
                 return;
             }
 
-            if (Streamer == null)
-            {
-                Debug.LogWarning($"MoodyBluesRuntimeManager.ObjectSetActive: toggled '{go.name}' before the handshake completed, no event emitted.");
-                return;
-            }
+            if (Streamer == null) return; // not recording; the next snapshot carries the new state
 
             if (active)
             {
@@ -406,6 +539,10 @@ namespace MoodyBlues
             id = 0;
             return false;
         }
+
+        /// <summary>The template ObjectID a spawned object was cloned from. False for scene objects.</summary>
+        public bool TryGetSpawnTemplateId(ushort spawnedObjectId, out ushort templateObjectId) =>
+            _templateIdBySpawnId.TryGetValue(spawnedObjectId, out templateObjectId);
 
         private void OnDestroy()
         {

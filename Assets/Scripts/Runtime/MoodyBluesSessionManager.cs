@@ -48,6 +48,12 @@ namespace MoodyBlues
 
         private const int InitialCapacity = 256;
 
+        [Header("Config")]
+        [SerializeField]
+        [Tooltip("This scene's MoodyBlues config asset (Assets > Create > MoodyBlues > Scene Config). " +
+                 "Without one, nothing is recorded.")]
+        private MoodyBluesClientConfig config;
+
         [Header("Capture")]
         [SerializeField]
         [Tooltip("Transform sampling rate in Hz. Independent of the physics timestep. Sampling " +
@@ -106,7 +112,10 @@ namespace MoodyBlues
         private bool _forceAbsoluteThisTick;
 
         private double _captureAccumulator;
-        private bool _streamingStopped;
+
+        // Set when there is no config, recording is switched off, or an unrecoverable error
+        // happened. Nothing records and nothing contacts the backend for the rest of this run.
+        private bool _inert;
 
         // ---- Encode diagnostics ---------------------------------------------------------------
         // Reported in EndSession so a too-tight quantization range surfaces as a number instead
@@ -142,13 +151,19 @@ namespace MoodyBlues
         {
             Instance = this;
 
-            MoodyBluesClientConfig config = MoodyBluesClientConfig.Instance;
+            if (config == null)
+            {
+                Debug.LogError(
+                    $"MoodyBluesSessionManager on '{name}': no config assigned, so this scene will not be " +
+                    "recorded. Create one via Assets > Create > MoodyBlues > Scene Config and assign it.");
+            }
+
             if (config == null || !config.RecordingEnabled)
             {
-                // No config asset, or recording switched off for this build: stay completely
-                // inert. No scene walk, no native allocations, no handshake. Teardown is still
-                // safe to reach afterwards -- every step of it is guarded.
-                _streamingStopped = true;
+                // No config, or recording switched off for this build: stay completely inert. No
+                // scene walk, no native allocations, no backend calls. Teardown is still safe to
+                // reach afterwards -- every step of it is guarded.
+                _inert = true;
                 enabled = false;
                 return;
             }
@@ -165,9 +180,11 @@ namespace MoodyBlues
             // Runs after MoodyBluesRuntimeManager's Awake (DefaultExecutionOrder -1000), so its
             // PrefabInstanceLibrary templates are already in the hierarchy and get picked up here
             // like any other scene object.
-            foreach (var rootObject in SceneManager.GetActiveScene().GetRootGameObjects())
+            var walk = new List<Transform>(InitialCapacity);
+            SceneWalk.Collect(SceneManager.GetActiveScene(), walk);
+            foreach (Transform t in walk)
             {
-                InsertTransformIntoList(rootObject.transform);
+                RegisterTransform(t);
             }
 
             _initialWalkObjectIds = _registrationOrder.ToArray();
@@ -175,23 +192,8 @@ namespace MoodyBlues
 
         private void Start()
         {
-            if (_streamingStopped) return;
-            MoodyBluesHandshakeClient.PerformHandshakeAndConnect(this);
-        }
-
-        /// <summary>
-        /// Called by MoodyBluesHandshakeClient once the handshake response arrives, with the
-        /// WebSocket URL the backend handed back. Until then there is no streamer and the capture
-        /// tick only maintains the capture set (see Spec.md Section 9) -- no data is lost, since
-        /// LastSent* stays seeded at each object's startup transform.
-        /// </summary>
-        public void ConnectTo(Uri webSocketUri)
-        {
-            if (_streamingStopped) return;
-
-            DataStreamer = new MoodyBluesStreamer(webSocketUri, captureHz);
-            _maintenance = new MoodyBluesMaintenanceSystem(DataStreamer);
-            _maintenance.StartAsync();
+            if (_inert) return;
+            InitializeRecorder();
         }
 
         /// <summary>
@@ -203,7 +205,10 @@ namespace MoodyBlues
         /// </summary>
         private void LateUpdate()
         {
-            if (_streamingStopped) return;
+            if (_inert) return;
+
+            MoodyBluesLog.DrainOffThreadQueue(this);
+            UpdateRecordingLifecycle();
 
             // Connection upkeep runs every frame on the real clock, independent of the capture
             // rate: a paused game must still hold its connection open.
@@ -229,8 +234,8 @@ namespace MoodyBlues
 
         private void CaptureTick()
         {
-            // Drains unconditionally, even with no streamer attached: otherwise the pending queue
-            // would grow for the whole handshake and then land in one spike.
+            // Drains even when nothing is recording: otherwise the pending queue would grow until
+            // the next StartRecording and then land in one spike.
             DrainPendingMutations();
 
             if (DataStreamer == null) return;
@@ -480,7 +485,7 @@ namespace MoodyBlues
                     $"(transforms={_transforms.length}, states={_states.Length}, ids={_objectIds.Length}). " +
                     "Something mutated the TransformAccessArray outside the drain step. Stopping the " +
                     "recording rather than emitting events against the wrong ObjectIDs.");
-                StopStreaming(Serializer.SessionEndReason.ClientError);
+                FailFatally(Serializer.SessionEndReason.ClientError);
                 return;
             }
 
@@ -531,28 +536,120 @@ namespace MoodyBlues
             }
         }
 
-        private void InsertTransformIntoList(Transform t)
+        // ---- Public registry API --------------------------------------------------------------
+
+        /// <summary>
+        /// Registers a whole spawned subtree as one block of consecutive ObjectIDs, in the order
+        /// given (walk order, root first). A receiver maps the block onto the template's subtree by
+        /// position, so the IDs must be consecutive: if the ID space cannot hold the whole block,
+        /// nothing is registered and 0 is returned. Otherwise returns the root's ID.
+        /// </summary>
+        public ushort RegisterSubtree(IReadOnlyList<Transform> nodes)
         {
-            // The build-time scene-identity holder exists only in Player builds. Letting it join
-            // the walk would hand the same scene two different ID spaces depending on whether it
-            // was launched from the Editor or a build, and sessions recorded under one would
-            // replay against the other's geometry. It has no children worth visiting either.
-            if (BakedSceneId.IsHolder(t)) return;
+            if (nodes == null || nodes.Count == 0) return 0;
 
-            // Static objects never move -- skip tracking, but still recurse into children,
-            // since a static parent can have a non-static moving child.
-            if (!t.gameObject.isStatic)
+            if (_nextObjectId + nodes.Count - 1 > ushort.MaxValue)
             {
-                RegisterTransform(t);
+                if (!_warnedIdExhaustion)
+                {
+                    _warnedIdExhaustion = true;
+                    Debug.LogError(
+                        $"MoodyBluesSessionManager: not enough ObjectIDs left for a {nodes.Count}-object spawn. " +
+                        "Further spawns will not be recorded. IDs are never reused -- pool and reuse spawned " +
+                        "objects instead of destroying them, or shorten the session.");
+                }
+                return 0;
             }
 
-            for (int i = 0; i < t.childCount; i++)
+            foreach (Transform t in nodes)
             {
-                InsertTransformIntoList(t.GetChild(i));
+                if (t == null || _idByTransform.ContainsKey(t))
+                {
+                    Debug.LogError("MoodyBluesSessionManager.RegisterSubtree: the subtree contains a missing or already tracked transform.");
+                    return 0;
+                }
             }
+
+            ushort rootId = 0;
+            foreach (Transform t in nodes)
+            {
+                ushort id = RegisterTransform(t);
+                if (rootId == 0) rootId = id;
+            }
+
+            return rootId;
         }
 
-        // ---- Public registry API --------------------------------------------------------------
+        /// <summary>
+        /// For a just-spawned clone child: if its local transform differs from the template pose the
+        /// receiver assumes for it, sends an absolute transform; either way its baseline becomes
+        /// what the receiver now holds. Must be called right after the InstantiateObject that
+        /// introduced it, so it shares that event's TimeStamp. Returns true if something was sent.
+        /// </summary>
+        public bool SendSpawnPoseIfDifferent(MoodyBluesStreamer streamer, ushort id, Vector3 assumedPosition, Quaternion assumedRotation, Vector3 assumedScale)
+        {
+            if (streamer == null) return false;
+            if (!_transformById.TryGetValue(id, out Transform t) || t == null) return false;
+
+            Vector3 position = t.localPosition;
+            Quaternion rotation = t.localRotation;
+            Vector3 scale = t.localScale;
+
+            bool changed =
+                TransformEventDispatcher.HasPositionChanged(position, assumedPosition) ||
+                TransformEventDispatcher.HasRotationChanged(rotation, assumedRotation) ||
+                TransformEventDispatcher.HasScaleChanged(scale, assumedScale);
+            if (!changed)
+            {
+                // The receiver holds the template pose; keep the baseline identical to it.
+                SetBaseline(id, new TrackedState { LastSentPosition = assumedPosition, LastSentRotation = assumedRotation, LastSentScale = assumedScale });
+                return false;
+            }
+
+            var data = new TransformData
+            {
+                ObjectId = id,
+                SendTrue = true,
+                PositionChanged = true,
+                RotationChanged = true,
+                ScaleChanged = true,
+                currentPosition = position,
+                currentRotation = rotation,
+                currentScale = scale,
+                previousPosition = assumedPosition,
+                previousRotation = assumedRotation,
+                previousScale = assumedScale,
+            };
+
+            TransformEncodeResult encoded = streamer.EnqueueTransform(data);
+            if (!encoded.Wrote) return false;
+
+            AccumulateEncodeDiagnostics(encoded, id);
+            SetBaseline(id, new TrackedState
+            {
+                LastSentPosition = encoded.Position,
+                LastSentRotation = encoded.Rotation,
+                LastSentScale = encoded.Scale,
+            });
+            return true;
+        }
+
+        /// <summary>Sets an object's delta baseline, whether it is in the capture set yet or still pending.</summary>
+        private void SetBaseline(ushort id, TrackedState state)
+        {
+            if (_indexById.TryGetValue(id, out int index))
+            {
+                _states[index] = state;
+                return;
+            }
+
+            for (int i = 0; i < _pendingRegistrations.Count; i++)
+            {
+                if (_pendingRegistrations[i].ObjectId != id) continue;
+                _pendingRegistrations[i] = new PendingRegistration(id, _pendingRegistrations[i].Target, state);
+                return;
+            }
+        }
 
         /// <summary>
         /// Assigns t a new, permanent ObjectID and queues it for per-tick sampling. Used for both
@@ -617,6 +714,9 @@ namespace MoodyBlues
 
             _transformById.Remove(id);
             if (t != null) _idByTransform.Remove(t);
+#if UNITY_EDITOR
+            _lastKnownParent.Remove(id);
+#endif
 
             // Array removal is deferred so the capture set stays stable for the whole tick. The
             // object may therefore still be sampled once more this tick, which is harmless: it is
@@ -748,6 +848,12 @@ namespace MoodyBlues
 
             AccumulateEncodeDiagnostics(encoded, id);
 
+#if UNITY_EDITOR
+            // This reparent went through the sanctioned wrapper; tell the bypass audit so it does
+            // not report it as a raw SetParent on its next pass.
+            _lastKnownParent[id] = t.parent;
+#endif
+
             // Re-baseline, or the first delta after the reparent would be measured against the
             // old parent's space.
             if (_indexById.TryGetValue(id, out int index))
@@ -785,59 +891,46 @@ namespace MoodyBlues
         }
 
         // ---- Shutdown -------------------------------------------------------------------------
-
-        private void OnDestroy()
-        {
-            // Also fires on scene unload/component destruction, not just app quit. OnApplicationQuit
-            // runs first when the app is actually quitting, and StopStreaming is idempotent, so the
-            // more specific reason wins.
-            StopStreaming(Serializer.SessionEndReason.SceneUnloaded);
-            if (Instance == this) Instance = null;
-        }
+        //
+        // Recording always ends when the component goes away, in both recording modes, so a
+        // session is never left open for the backend's inactivity timeout to clean up. These
+        // paths stop synchronously (blocking for at most the 2 s close timeout) because Unity
+        // tears the object down as soon as they return.
 
         private void OnApplicationQuit()
         {
-            StopStreaming(Serializer.SessionEndReason.ApplicationQuit);
+            StopRecordingImmediate(Serializer.SessionEndReason.ApplicationQuit);
         }
 
-        /// <summary>
-        /// Public API: ends the current recording immediately. Safe to call manually (e.g. a
-        /// developer wants to stop recording mid-session) or let it happen automatically on app
-        /// quit -- idempotent, so calling it more than once (or after it already ran) is a no-op.
-        ///
-        /// Emits EndSession, flushes, and closes the socket synchronously (blocking, with a short
-        /// timeout) so the backend is told promptly rather than relying on its inactivity timeout.
-        /// All tracking/streaming is then disabled; gameplay objects themselves are left untouched
-        /// (this only stops recording, it doesn't tear down the scene).
-        /// </summary>
-        public void StopStreaming(Serializer.SessionEndReason reason = Serializer.SessionEndReason.StoppedByHost)
+        private void OnDisable()
         {
-            if (_streamingStopped) return;
-            _streamingStopped = true;
+            // A component or GameObject being switched off is the host stopping the recording;
+            // anything else reaching OnDisable is the scene being unloaded or the object destroyed.
+            bool switchedOff = !enabled || !gameObject.activeInHierarchy;
+            StopRecordingImmediate(switchedOff
+                ? Serializer.SessionEndReason.StoppedByHost
+                : Serializer.SessionEndReason.SceneUnloaded);
+        }
 
-            // End() writes EndSession, flushes it, closes the socket, and disposes the transport.
-            // A stream that stops *without* EndSession tells the receiver it was truncated, so
-            // this is the only orderly way out.
-            _maintenance?.End(reason, _deltaPromotionCount, _rotationWidenCount, _hardClampCount);
-            _maintenance = null;
-            DataStreamer = null;
+        private void OnDestroy()
+        {
+            StopRecordingImmediate(Serializer.SessionEndReason.SceneUnloaded);
+            _inert = true;
 
-            // Stop sampling and drop all tracking state. Gameplay GameObjects are not touched --
-            // this only disables the recording machinery.
-            enabled = false;
             _idByTransform.Clear();
             _transformById.Clear();
             _indexById.Clear();
             _pendingRegistrations.Clear();
             _pendingUnregistrations.Clear();
-
             DisposeCaptureSet();
+
+            if (Instance == this) Instance = null;
         }
 
         /// <summary>
         /// Native containers are not garbage collected -- without this Unity reports a leaked
-        /// allocation on exiting play mode. Idempotent, since StopStreaming and OnDestroy can both
-        /// reach it.
+        /// allocation on exiting play mode. Only OnDestroy calls it: the capture set outlives each
+        /// individual recording.
         /// </summary>
         private void DisposeCaptureSet()
         {

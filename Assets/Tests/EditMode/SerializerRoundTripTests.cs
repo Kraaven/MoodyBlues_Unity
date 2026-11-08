@@ -93,11 +93,14 @@ namespace MoodyBlues.Tests
         }
 
         [Test]
-        public void BeginSession_IsTheLargestEvent()
+        public void LogEvent_IsTheLargestEvent_At32Bytes()
         {
             // MaxEventSize bounds every stackalloc scratch buffer and the ring buffer's
-            // single-event reservation, so it has to actually be the maximum.
-            Assert.AreEqual(Serializer.BeginSessionSize, Serializer.MaxEventSize);
+            // single-event reservation, so it has to actually be the maximum. Protocol v3 caps
+            // every event at 32 bytes; the Log event is the one that reaches it.
+            Assert.AreEqual(32, Serializer.MaxEventSize);
+            Assert.AreEqual(Serializer.LogSize, Serializer.MaxEventSize);
+            Assert.GreaterOrEqual(Serializer.MaxEventSize, Serializer.BeginSessionSize);
             Assert.GreaterOrEqual(Serializer.MaxEventSize, Serializer.InstantiateObjectSize);
             Assert.GreaterOrEqual(Serializer.MaxEventSize, Serializer.ReparentObjectSize);
             Assert.GreaterOrEqual(Serializer.MaxEventSize, Serializer.TrueTransformSize);

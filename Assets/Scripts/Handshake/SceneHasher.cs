@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEngine;
@@ -7,19 +8,23 @@ using UnityEngine.SceneManagement;
 namespace MoodyBlues
 {
     /// <summary>
-    /// Computes the sceneHash sent in the handshake request (see Spec.md Section 9).
+    /// Computes the sceneHash sent in the handshake request (see Spec.md Section 13.2). It answers
+    /// one question: "is the scene export the backend already holds valid for this scene?" It is
+    /// built from two parts, combined by <see cref="Combine"/>:
     ///
-    /// The question this hash answers is narrow: "is the scene export the backend already holds
-    /// still valid for this scene?" So it has to fold in everything the export carries -- the
-    /// object set, the ID mapping, the hierarchy, and the transforms baked into each node.
+    /// - The <b>content hash</b> (SceneContentHash): Unity's own dependency hashes of every asset
+    ///   the scene uses -- meshes, materials, textures, shaders, prefabs -- computed in the Editor
+    ///   and baked into builds. It catches content edits that move nothing.
+    /// - The <b>structural hash</b> (this class): the object set, the ID mapping, the hierarchy,
+    ///   and every transform, as the scene actually is at Start.
     ///
-    /// WHEN it samples matters as much as what. It runs from MoodyBluesSessionManager.Start, which
-    /// (with that component's execution order of 1000) is after every other Awake and Start. That
-    /// pins the transforms it reads to a defined moment; without it, a script whose Start nudged an
-    /// object could land either side of the hash depending on Unity's ordering, so an unmodified
-    /// scene would hash differently between runs and re-upload itself for no reason.
+    /// Neither part needs a GLB export, so the hash is cheap enough to compute on every load.
     ///
-    /// Buffer layout:
+    /// WHEN the structural hash samples matters as much as what. At runtime it runs from
+    /// MoodyBluesSessionManager.Start, which (with that component's execution order of 1000) is
+    /// after every other Awake and Start, so the transforms it reads have a defined moment.
+    ///
+    /// Structural buffer layout:
     ///   [sceneName UTF8] [0x00]
     ///   for each ObjectID (walk order):
     ///     [hierarchyPath UTF8] [0x00] [ObjectID 2B LE]
@@ -30,10 +35,50 @@ namespace MoodyBlues
     {
         private const int TransformByteCount = 40; // 3 + 4 + 3 floats
 
+        /// <summary>The structural hash of the running scene, over its initial-walk ObjectIDs.</summary>
         public static string ComputeSceneHash(MoodyBluesSessionManager sessionManager)
         {
             var objectIds = sessionManager.InitialWalkObjectIds;
-            string sceneName = SceneManager.GetActiveScene().name;
+            var transforms = new Transform[objectIds.Count];
+            for (int i = 0; i < objectIds.Count; i++)
+            {
+                sessionManager.TryGetTransform(objectIds[i], out transforms[i]);
+            }
+
+            return ComputeStructuralHash(SceneManager.GetActiveScene().name, objectIds, transforms);
+        }
+
+        /// <summary>
+        /// The structural hash for an editor-side walk (<see cref="SceneWalk"/>): ObjectID n is the
+        /// n-th transform, exactly as the running game assigns them.
+        /// </summary>
+        public static string ComputeStructuralHash(string sceneName, IReadOnlyList<Transform> walk)
+        {
+            var ids = new ushort[walk.Count];
+            for (int i = 0; i < ids.Length; i++) ids[i] = (ushort)(i + 1);
+            return ComputeStructuralHash(sceneName, ids, walk);
+        }
+
+        /// <summary>
+        /// The full scene hash sent in the handshake: SHA-256 over the content hash (the assets the
+        /// scene uses, see SceneContentHash), the structural hash, and, for scenes exported on every
+        /// run, the hash of that export. Lowercase hex.
+        /// </summary>
+        public static string Combine(string contentHash, string structuralHash, string exportHash = null)
+        {
+            string text = $"content:{contentHash ?? ""}\nstructure:{structuralHash}\nexport:{exportHash ?? ""}";
+            using var sha256 = SHA256.Create();
+            return ToLowerHex(sha256.ComputeHash(Encoding.UTF8.GetBytes(text)));
+        }
+
+        public static string HashBytes(byte[] bytes)
+        {
+            using var sha256 = SHA256.Create();
+            return ToLowerHex(sha256.ComputeHash(bytes));
+        }
+
+        private static string ComputeStructuralHash(string sceneName, IReadOnlyList<ushort> objectIds, IReadOnlyList<Transform> transforms)
+        {
 
             // Full hierarchy path rather than the bare name. Two same-named siblings that swap
             // order keep the same (name, id) pairs between runs, so a name-only hash would call
@@ -41,9 +86,7 @@ namespace MoodyBlues
             var paths = new string[objectIds.Count];
             for (int i = 0; i < objectIds.Count; i++)
             {
-                paths[i] = sessionManager.TryGetTransform(objectIds[i], out Transform t)
-                    ? BuildHierarchyPath(t)
-                    : string.Empty;
+                paths[i] = transforms[i] != null ? BuildHierarchyPath(transforms[i]) : string.Empty;
             }
 
             int size = Encoding.UTF8.GetByteCount(sceneName) + 1;
@@ -74,9 +117,9 @@ namespace MoodyBlues
                 buffer[offset++] = (byte)(id & 0xFF);
                 buffer[offset++] = (byte)((id >> 8) & 0xFF);
 
-                if (sessionManager.TryGetTransform(id, out Transform t))
+                if (transforms[i] != null)
                 {
-                    WriteTransform(t, buffer, offset);
+                    WriteTransform(transforms[i], buffer, offset);
                 }
 
                 // Destroyed/untracked objects leave the slot zeroed rather than shifting every

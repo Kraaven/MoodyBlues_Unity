@@ -97,7 +97,13 @@ namespace MoodyBlues
             /// <summary>
             /// A tracked object's parent changed at runtime. See Spec.md Section 5.1.
             /// </summary>
-            ReparentObject = 32
+            ReparentObject = 32,
+
+            /// <summary>
+            /// A developer log line (Spec.md Section 6.7). No envelope; fixed 35 bytes. Long
+            /// messages span several consecutive Log events.
+            /// </summary>
+            Log = 33
         }
 
         /// <summary>Why a session ended, carried in EndSession.</summary>
@@ -152,6 +158,11 @@ namespace MoodyBlues
         /// <summary>
         /// Sets the tunable quantization ranges for this session. Call once at startup, before
         /// anything is encoded; <c>BeginSession</c> puts the same values on the wire.
+        ///
+        /// BeginSession carries the ranges as 16-bit floats (protocol v3), so each value is
+        /// rounded to the nearest 16-bit float here, before use. The client then encodes against
+        /// exactly the values the receiver decodes; otherwise the two sides would quantize
+        /// against slightly different ranges and drift apart.
         /// </summary>
         public static void ConfigureRanges(
             float positionRange,
@@ -162,14 +173,20 @@ namespace MoodyBlues
             float deltaSingleAxisAngleRange,
             float deltaScaleRange)
         {
-            PositionRange = positionRange;
-            ScaleMin = scaleMin;
-            ScaleMax = scaleMax;
-            DeltaPositionRange = deltaPositionRange;
-            DeltaRotationComponentRange = deltaRotationComponentRange;
-            DeltaSingleAxisAngleRange = deltaSingleAxisAngleRange;
-            DeltaScaleRange = deltaScaleRange;
+            PositionRange = ToHalfPrecision(positionRange);
+            ScaleMin = ToHalfPrecision(scaleMin);
+            ScaleMax = ToHalfPrecision(scaleMax);
+            DeltaPositionRange = ToHalfPrecision(deltaPositionRange);
+            DeltaRotationComponentRange = ToHalfPrecision(deltaRotationComponentRange);
+            DeltaSingleAxisAngleRange = ToHalfPrecision(deltaSingleAxisAngleRange);
+            DeltaScaleRange = ToHalfPrecision(deltaScaleRange);
         }
+
+        /// <summary>Largest finite 16-bit float; config ranges must stay within it.</summary>
+        public const float MaxHalfValue = 65504f;
+
+        /// <summary>The value a receiver decodes after this float is sent as a 16-bit float.</summary>
+        public static float ToHalfPrecision(float value) => Mathf.HalfToFloat(Mathf.FloatToHalf(value));
 
         /// <summary>Current ranges, for BeginSession to declare and for tests to assert against.</summary>
         public static (float PositionRange, float ScaleMin, float ScaleMax, float DeltaPositionRange,
@@ -406,7 +423,7 @@ namespace MoodyBlues
         private static void SerializeRotationSingleAxisToBuffer(byte axisId, float angle, float min, float max, Span<byte> destination)
         {
             uint quantizedAngle = QuantizeToBits(angle, min, max, 14);
-            ushort packed = (ushort)((axisId & 0x3) | (quantizedAngle << 2));
+            ushort packed = (ushort)((uint)(axisId & 0x3) | (quantizedAngle << 2));
             MemoryMarshal.Cast<byte, ushort>(destination)[0] = packed;
         }
 
@@ -803,17 +820,21 @@ namespace MoodyBlues
         /// receiver is expected to refuse a stream it doesn't recognise rather than decode it
         /// optimistically -- there is no compatibility shim in either direction.
         /// </summary>
-        public const ushort ProtocolVersion = 1;
+        public const ushort ProtocolVersion = 3;
 
         /// <summary>
         /// First event on every connection, including after a reconnect. Declares the wire version
         /// and every tunable quantization range, so a receiver never has to assume them -- which
         /// also means the ranges can be retuned per project without a protocol change.
         ///
+        /// The capture rate and ranges travel as 16-bit floats (protocol v3), which keeps the event
+        /// at 19 bytes. ConfigureRanges already rounded the ranges to 16-bit precision, so the
+        /// values written here are exactly the ones this client encodes against.
+        ///
         /// Re-sent on reconnect deliberately: a resumed connection is a fresh decode context, and
         /// it keeps the event droppable under backpressure without losing the parameters.
         /// </summary>
-        public const int BeginSessionSize = 1 + 2 + 4 + (7 * 4); // type + version + captureHz + 7 ranges
+        public const int BeginSessionSize = 1 + 2 + (8 * 2); // type + version + captureHz + 7 ranges, float16
         public static int SerializeBeginSession(float captureHz, Span<byte> destination)
         {
             destination[0] = GetEventTypeByte(EventType.BeginSession);
@@ -822,16 +843,22 @@ namespace MoodyBlues
             MemoryMarshal.Cast<byte, ushort>(destination.Slice(offset, 2))[0] = ProtocolVersion;
             offset += 2;
 
-            WriteFloat(captureHz, destination, ref offset);
-            WriteFloat(PositionRange, destination, ref offset);
-            WriteFloat(ScaleMin, destination, ref offset);
-            WriteFloat(ScaleMax, destination, ref offset);
-            WriteFloat(DeltaPositionRange, destination, ref offset);
-            WriteFloat(DeltaRotationComponentRange, destination, ref offset);
-            WriteFloat(DeltaSingleAxisAngleRange, destination, ref offset);
-            WriteFloat(DeltaScaleRange, destination, ref offset);
+            WriteHalf(captureHz, destination, ref offset);
+            WriteHalf(PositionRange, destination, ref offset);
+            WriteHalf(ScaleMin, destination, ref offset);
+            WriteHalf(ScaleMax, destination, ref offset);
+            WriteHalf(DeltaPositionRange, destination, ref offset);
+            WriteHalf(DeltaRotationComponentRange, destination, ref offset);
+            WriteHalf(DeltaSingleAxisAngleRange, destination, ref offset);
+            WriteHalf(DeltaScaleRange, destination, ref offset);
 
             return BeginSessionSize;
+        }
+
+        private static void WriteHalf(float value, Span<byte> destination, ref int offset)
+        {
+            MemoryMarshal.Cast<byte, ushort>(destination.Slice(offset, 2))[0] = Mathf.FloatToHalf(value);
+            offset += 2;
         }
 
         /// <summary>
@@ -875,10 +902,31 @@ namespace MoodyBlues
             return EndSessionSize;
         }
 
-        private static void WriteFloat(float value, Span<byte> destination, ref int offset)
+        // ---- Log (Spec.md Section 6.7) --------------------------------------------------------
+
+        /// <summary>Text bytes carried by one Log event.</summary>
+        public const int LogTextBytes = 30;
+
+        /// <summary>type + style + text: 32 bytes, the largest event in protocol v3.</summary>
+        public const int LogSize = 1 + 1 + LogTextBytes;
+
+        /// <summary>
+        /// Writes one Log event. <paramref name="style"/> packs the level in the top 2 bits (bits
+        /// 6-7; 0 = this event continues the previous log's text) and the colour index in the low
+        /// 6 bits (see MoodyBluesLog.PackStyle).
+        /// <paramref name="text"/> is up to <see cref="LogTextBytes"/> bytes of UTF-8; shorter text
+        /// is zero-padded, and a reader stops at the first zero byte.
+        /// </summary>
+        public static int SerializeLog(byte style, ReadOnlySpan<byte> text, Span<byte> destination)
         {
-            MemoryMarshal.Cast<byte, float>(destination.Slice(offset, 4))[0] = value;
-            offset += 4;
+            if (text.Length > LogTextBytes) throw new ArgumentOutOfRangeException(nameof(text));
+
+            destination[0] = GetEventTypeByte(EventType.Log);
+            destination[1] = style;
+            Span<byte> body = destination.Slice(2, LogTextBytes);
+            text.CopyTo(body);
+            body.Slice(text.Length).Clear();
+            return LogSize;
         }
 
         private static void WriteUInt32(uint value, Span<byte> destination, ref int offset)
@@ -888,11 +936,11 @@ namespace MoodyBlues
         }
 
         /// <summary>
-        /// Largest possible single event across every type. BeginSession overtook
-        /// InstantiateObject when it started declaring the quantization ranges; this bounds both
-        /// the stackalloc scratch buffers and the ring buffer's single-event reservation.
+        /// Largest possible single event across every type: 32 bytes in protocol v3, reached by
+        /// the Log event. This bounds both the stackalloc scratch buffers and the ring buffer's
+        /// single-event reservation.
         /// </summary>
-        public const int MaxEventSize = BeginSessionSize;
+        public const int MaxEventSize = LogSize;
 
         #endregion
     }

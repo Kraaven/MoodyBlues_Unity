@@ -10,9 +10,16 @@ namespace MoodyBlues
         /// into a tracked object's glTF node extras during scene export. Called from
         /// <see cref="ObjectIdExportPlugin"/>, which writes the <c>objectId</c> itself.
         /// </summary>
-        public static void PopulateObjectUserData(Transform target, JObject nodeExtras)
+        public static void PopulateObjectUserData(Transform target, JObject nodeExtras) =>
+            PopulateObjectUserData(target, nodeExtras, target.gameObject.activeSelf);
+
+        /// <summary>
+        /// As above, with the visibility to record given explicitly: a runtime export describes the
+        /// scene as it was at Start, which may differ from its state at the moment of export.
+        /// </summary>
+        public static void PopulateObjectUserData(Transform target, JObject nodeExtras, bool activeSelf)
         {
-            WriteInitialVisibility(target, nodeExtras);
+            if (!activeSelf) nodeExtras["isHidden"] = true;
             WriteInvertedLookDirection(target, nodeExtras);
         }
 
@@ -31,21 +38,12 @@ namespace MoodyBlues
             }
         }
 
-        /// <summary>
-        /// Records startup visibility. The wire protocol deliberately never transmits this: it is
-        /// static scene state, so it belongs with the scene export rather than the event stream.
-        ///
-        /// Tests <c>activeSelf</c> rather than <c>activeInHierarchy</c> on purpose. glTF consumers
-        /// propagate a hidden node to its descendants, so flagging only the object that is itself
-        /// inactive reproduces Unity's <c>activeInHierarchy</c> result for the whole subtree
-        /// without redundantly flagging every child.
-        /// </summary>
-        private static void WriteInitialVisibility(Transform target, JObject nodeExtras)
-        {
-            if (!target.gameObject.activeSelf)
-            {
-                nodeExtras["isHidden"] = true;
-            }
-        }
+        // Startup visibility (written by PopulateObjectUserData as isHidden). The wire protocol
+        // deliberately never transmits this: it is static scene state, so it belongs with the
+        // scene export rather than the event stream.
+        //
+        // activeSelf rather than activeInHierarchy on purpose. glTF consumers propagate a hidden
+        // node to its descendants, so flagging only the object that is itself inactive reproduces
+        // Unity's activeInHierarchy result for the whole subtree without flagging every child.
     }
 }

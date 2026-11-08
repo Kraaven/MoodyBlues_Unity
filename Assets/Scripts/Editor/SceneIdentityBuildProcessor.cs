@@ -8,9 +8,10 @@ namespace MoodyBlues.EditorTools
 {
     /// <summary>
     /// Build-time step that stamps each built scene with a BakedSceneId component holding Unity's
-    /// own scene-asset GUID, so SceneIdentity.GetCurrentSceneId() has something to read once the
-    /// Editor-only AssetDatabase lookup is gone (see Assets/Scripts/Handshake/SceneIdentity.cs).
-    /// Only affects the in-memory copy of the scene being built -- never touches the .unity asset.
+    /// own scene-asset GUID and the scene's content hash, so SceneIdentity and SceneContentHash have
+    /// something to read once the Editor-only AssetDatabase is gone (see
+    /// Assets/Scripts/Handshake/SceneIdentity.cs). Only affects the in-memory copy of the scene being
+    /// built -- never touches the .unity asset.
     /// </summary>
     public class SceneIdentityBuildProcessor : IProcessSceneWithReport
     {
@@ -18,6 +19,10 @@ namespace MoodyBlues.EditorTools
 
         public void OnProcessScene(Scene scene, BuildReport report)
         {
+            // Unity also calls this for every scene entering Play mode, with no report. Play mode
+            // reads both values live from the AssetDatabase, so there is nothing to stamp.
+            if (report == null) return;
+
             string sceneId = AssetDatabase.AssetPathToGUID(scene.path);
             if (string.IsNullOrEmpty(sceneId))
             {
@@ -34,17 +39,16 @@ namespace MoodyBlues.EditorTools
 
             if (baked == null)
             {
+                // Created last, so it is the last root: the other roots keep the sibling indices
+                // the scene hash saw in the Editor.
                 var holder = new GameObject(BakedSceneId.HolderName);
                 SceneManager.MoveGameObjectToScene(holder, scene);
                 baked = holder.AddComponent<BakedSceneId>();
-
-                // Belt and braces. The scene walk and glTF export both skip this object by
-                // component (BakedSceneId.IsHolder), but marking it static means even a walk that
-                // only honoured the static flag would leave it out -- and it genuinely never moves.
                 holder.isStatic = true;
             }
 
             baked.SetSceneId(sceneId);
+            baked.SetContentHash(SceneContentHashEditor.Compute(scene.path));
         }
     }
 }

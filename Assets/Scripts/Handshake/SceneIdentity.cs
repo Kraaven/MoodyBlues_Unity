@@ -50,9 +50,16 @@ namespace MoodyBlues
 
         [SerializeField] private string sceneId;
 
+        [SerializeField] private string contentHash;
+
         public string SceneId => sceneId;
 
+        /// <summary>The scene's content hash at build time (see SceneContentHash).</summary>
+        public string ContentHash => contentHash;
+
         public void SetSceneId(string id) => sceneId = id;
+
+        public void SetContentHash(string hash) => contentHash = hash;
 
         /// <summary>
         /// True if this transform is the injected scene-identity holder, and so must be skipped by
