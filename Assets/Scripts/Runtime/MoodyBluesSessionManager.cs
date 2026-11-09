@@ -50,9 +50,16 @@ namespace MoodyBlues
 
         [Header("Config")]
         [SerializeField]
-        [Tooltip("This scene's MoodyBlues config asset (Assets > Create > MoodyBlues > Scene Config). " +
-                 "Without one, nothing is recorded.")]
+        [Tooltip("Optional per-scene settings (Assets > Create > MoodyBlues > Scene Config): recording mode, " +
+                 "scene export and quantization ranges. Without one, the defaults are used. The server " +
+                 "connection is set once for the project in MoodyBlues > Settings.")]
         private MoodyBluesClientConfig config;
+
+        // Created in Awake when no config is assigned; destroyed with this component.
+        private MoodyBluesClientConfig _defaultConfig;
+
+        // The project's backend connection, from MoodyBluesProjectSettings, resolved in Awake.
+        private MoodyBluesConnection _connection;
 
         [Header("Capture")]
         [SerializeField]
@@ -113,8 +120,8 @@ namespace MoodyBlues
 
         private double _captureAccumulator;
 
-        // Set when there is no config, recording is switched off, or an unrecoverable error
-        // happened. Nothing records and nothing contacts the backend for the rest of this run.
+        // Set when recording is switched off, the project has no connection, or an unrecoverable
+        // error happened. Nothing records and nothing contacts the backend for the rest of this run.
         private bool _inert;
 
         // ---- Encode diagnostics ---------------------------------------------------------------
@@ -153,16 +160,26 @@ namespace MoodyBlues
 
             if (config == null)
             {
-                Debug.LogError(
-                    $"MoodyBluesSessionManager on '{name}': no config assigned, so this scene will not be " +
-                    "recorded. Create one via Assets > Create > MoodyBlues > Scene Config and assign it.");
+                // No scene config: record with the defaults. Each recorded scene used to need one;
+                // now only scenes that change a setting do.
+                _defaultConfig = ScriptableObject.CreateInstance<MoodyBluesClientConfig>();
+                _defaultConfig.hideFlags = HideFlags.DontSave;
+                config = _defaultConfig;
             }
 
-            if (config == null || !config.RecordingEnabled)
+            if (!config.RecordingEnabled)
             {
-                // No config, or recording switched off for this build: stay completely inert. No
-                // scene walk, no native allocations, no backend calls. Teardown is still safe to
-                // reach afterwards -- every step of it is guarded.
+                // Recording switched off for this build: stay completely inert. No scene walk, no
+                // native allocations, no backend calls. Teardown is still safe to reach
+                // afterwards -- every step of it is guarded.
+                _inert = true;
+                enabled = false;
+                return;
+            }
+
+            if (!MoodyBluesProjectSettings.TryGetConnection(out _connection, out string connectionError))
+            {
+                Debug.LogWarning($"MoodyBluesSessionManager on '{name}': {connectionError} This scene is not recorded.");
                 _inert = true;
                 enabled = false;
                 return;
@@ -923,6 +940,12 @@ namespace MoodyBlues
             _pendingRegistrations.Clear();
             _pendingUnregistrations.Clear();
             DisposeCaptureSet();
+
+            if (_defaultConfig != null)
+            {
+                Destroy(_defaultConfig);
+                _defaultConfig = null;
+            }
 
             if (Instance == this) Instance = null;
         }

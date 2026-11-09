@@ -4,9 +4,9 @@ using UnityEngine;
 namespace MoodyBlues.EditorTools
 {
     /// <summary>
-    /// Inspector for <see cref="MoodyBluesClientConfig"/>. Shows the backend, recording and scene
-    /// export settings directly and hides the quantization ranges behind a foldout, since most
-    /// projects never need to change them.
+    /// Inspector for <see cref="MoodyBluesClientConfig"/>. Shows the recording and scene export
+    /// settings directly and hides the quantization ranges behind a foldout, since most projects
+    /// never need to change them. Warns, with a shortcut, while the project has no connection.
     /// </summary>
     [CustomEditor(typeof(MoodyBluesClientConfig))]
     public sealed class MoodyBluesClientConfigEditor : Editor
@@ -15,8 +15,6 @@ namespace MoodyBlues.EditorTools
 
         private static readonly string[] GeneralFields =
         {
-            "developerId",
-            "backendBaseUrl",
             "recordingEnabled",
             "recordingMode",
             "messageSize",
@@ -36,6 +34,13 @@ namespace MoodyBlues.EditorTools
         public override void OnInspectorGUI()
         {
             serializedObject.Update();
+
+            if (!MoodyBluesProjectSettings.TryGetConnection(out _, out string connectionError))
+            {
+                EditorGUILayout.HelpBox(connectionError, MessageType.Warning);
+                if (GUILayout.Button("Open MoodyBlues Settings")) MoodyBluesSettingsProvider.Open();
+                EditorGUILayout.Space();
+            }
 
             foreach (string field in GeneralFields)
             {
@@ -80,7 +85,7 @@ namespace MoodyBlues.EditorTools
                 EditorGUILayout.HelpBox(
                     "Runtime export needs Read/Write on every model in this scene, which keeps a CPU copy " +
                     "of each mesh in memory (roughly double the mesh memory on Quest). Builds enable it " +
-                    "automatically; Tools > MoodyBlues > Make Scene Meshes Readable does it now.",
+                    "automatically; MoodyBlues > Make Scene Meshes Readable does it now.",
                     MessageType.None);
             }
 
@@ -92,14 +97,14 @@ namespace MoodyBlues.EditorTools
                     "MoodyBlues: scene export is off",
                     "Neither build-time nor runtime export is enabled for scenes using this config.\n\n" +
                     "Recordings will still be made, but they can only be replayed once you export the scene " +
-                    "yourself with Tools > MoodyBlues > Export This Scene (or Export All Scenes).",
+                    "yourself with MoodyBlues > Export This Scene (or Export All Scenes).",
                     "OK");
             }
 
             if (!isExporting)
             {
                 EditorGUILayout.HelpBox(
-                    "Scene export is off. Export the scene yourself with Tools > MoodyBlues > Export This Scene, " +
+                    "Scene export is off. Export the scene yourself with MoodyBlues > Export This Scene, " +
                     "otherwise recordings wait for their scene and cannot be replayed.",
                     MessageType.Warning);
             }

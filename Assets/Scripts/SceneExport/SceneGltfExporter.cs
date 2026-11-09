@@ -91,8 +91,8 @@ namespace MoodyBlues
                     Debug.LogWarning(
                         $"SceneGltfExporter: {skippedMeshes} mesh(es) could not be exported and will be missing from the " +
                         $"replay ({job.DescribeSkipped()}). Meshes need Read/Write for a runtime export " +
-                        "(Tools > MoodyBlues > Make Scene Meshes Readable), and statically batched meshes cannot be " +
-                        "exported at runtime: export from the Editor instead (Tools > MoodyBlues > Export This Scene).");
+                        "(MoodyBlues > Make Scene Meshes Readable), and statically batched meshes cannot be " +
+                        "exported at runtime: export from the Editor instead (MoodyBlues > Export This Scene).");
                 }
 
                 return glb;

@@ -21,7 +21,7 @@ namespace MoodyBlues
         /// <summary>
         /// The backend needs this scene version, but this run may not export it (runtime export is
         /// off for this context, or the scene changed too much since Start). Recording carries on;
-        /// the sessions wait on the backend until the version is exported from Tools > MoodyBlues.
+        /// the sessions wait on the backend until the version is exported from the MoodyBlues menu.
         /// </summary>
         NotExported,
     }
@@ -117,7 +117,7 @@ namespace MoodyBlues
         /// <summary>True from StartRecording until the recording stops or fails to start.</summary>
         public bool IsRecording => _phase != RecordingPhase.Idle;
 
-        /// <summary>This scene's config asset.</summary>
+        /// <summary>This scene's config asset, or null if it has none (the defaults are used).</summary>
         public MoodyBluesClientConfig Config => config;
 
         // ---- Public API -------------------------------------------------------------------------
@@ -355,14 +355,13 @@ namespace MoodyBlues
             {
                 var request = new HandshakeRequest
                 {
-                    developerId = config.DeveloperId,
                     sceneId = _sceneId,
                     sceneHash = _sceneHash,
                     sessionId = Guid.NewGuid().ToString(),
                 };
 
                 HandshakeResponse response = await MoodyBluesHandshakeClient.HandshakeAsync(
-                    config, request, _startDeadlineUtc, () => generation != _recordingGeneration);
+                    _connection, request, _startDeadlineUtc, () => generation != _recordingGeneration);
 
                 if (generation != _recordingGeneration || this == null) return; // stopped meanwhile
 
@@ -383,7 +382,7 @@ namespace MoodyBlues
                     return;
                 }
 
-                BeginStreaming(webSocketUri);
+                BeginStreaming(webSocketUri, response.streamToken);
 
                 if (response.sceneUploadRequired)
                 {
@@ -403,14 +402,14 @@ namespace MoodyBlues
         /// Handshake done: create the transport, write the snapshot into its buffer, and start
         /// connecting. The buffer is sent once the socket opens, right after BeginSession.
         /// </summary>
-        private void BeginStreaming(Uri webSocketUri)
+        private void BeginStreaming(Uri webSocketUri, string streamToken)
         {
             // Everything registered or destroyed since the last tick must be in the capture set
             // before the snapshot walks it.
             DrainPendingMutations();
             if (_inert) return;
 
-            var streamer = new MoodyBluesStreamer(webSocketUri, captureHz, config.MessageSizeBytes);
+            var streamer = new MoodyBluesStreamer(webSocketUri, streamToken, captureHz, config.MessageSizeBytes);
             var maintenance = new MoodyBluesMaintenanceSystem(streamer);
 
             ResetSessionDiagnostics();
@@ -819,13 +818,12 @@ namespace MoodyBlues
             {
                 var request = new SceneCheckRequest
                 {
-                    developerId = config.DeveloperId,
                     sceneId = _sceneId,
                     sceneHash = _sceneHash,
                 };
 
                 SceneCheckResponse response = await MoodyBluesHandshakeClient.CheckSceneAsync(
-                    config, request, DateTime.UtcNow + SceneCheckTimeout);
+                    _connection, request, DateTime.UtcNow + SceneCheckTimeout);
                 if (response == null) return SceneSendResult.Failed;
 
                 if (!response.sceneUploadRequired)
@@ -840,7 +838,7 @@ namespace MoodyBlues
             if (_sceneGlb == null && !TryExportForUpload()) return SceneSendResult.NotExported;
             if (_sceneGlb == null) return SceneSendResult.Failed; // the export threw; already logged
 
-            if (!await MoodyBluesHandshakeClient.UploadSceneAsync(uploadUrl, _sceneGlb, _sceneSkippedMeshes)) return SceneSendResult.Failed;
+            if (!await MoodyBluesHandshakeClient.UploadSceneAsync(uploadUrl, _connection.IngestKey, _sceneGlb, _sceneSkippedMeshes)) return SceneSendResult.Failed;
 
             MarkSceneOnServer();
             return SceneSendResult.Uploaded;
@@ -879,7 +877,7 @@ namespace MoodyBlues
             Debug.LogWarning(
                 $"MoodyBluesSessionManager: the backend does not have this version of scene '{SceneManager.GetActiveScene().name}', " +
                 $"and it was not exported because {reason}. Recording continues; its sessions wait on the backend " +
-                "until the version is exported with Tools > MoodyBlues > Export This Scene (or a build).");
+                "until the version is exported with MoodyBlues > Export This Scene (or a build).");
         }
 
         /// <summary>

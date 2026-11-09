@@ -12,7 +12,7 @@ namespace MoodyBlues.EditorTools
 {
     /// <summary>
     /// Editor-side scene export (Spec.md Section 9), shared by the build step and the
-    /// Tools > MoodyBlues menu. For one scene it:
+    /// MoodyBlues menu. For one scene it:
     ///
     /// 1. opens the scene as saved on disk;
     /// 2. builds the prefab template library exactly as MoodyBluesRuntimeManager.Awake does;
@@ -38,8 +38,6 @@ namespace MoodyBlues.EditorTools
             public string sceneHash;
             public string scenePath;
             public string sceneName;
-            public string developerId;
-            public string backendBaseUrl;
             public int skippedMeshes;
             public string createdUtc;
 
@@ -124,6 +122,22 @@ namespace MoodyBlues.EditorTools
             return null;
         }
 
+        private static MoodyBluesClientConfig _defaults;
+
+        /// <summary>The settings a scene records with: its config, or the defaults if it has none.</summary>
+        public static MoodyBluesClientConfig PeekSettings(string scenePath)
+        {
+            MoodyBluesClientConfig config = PeekConfig(scenePath);
+            if (config != null) return config;
+
+            if (_defaults == null)
+            {
+                _defaults = ScriptableObject.CreateInstance<MoodyBluesClientConfig>();
+                _defaults.hideFlags = HideFlags.HideAndDontSave;
+            }
+            return _defaults;
+        }
+
         // ---- Opening scenes ---------------------------------------------------------------------
 
         /// <summary>
@@ -200,13 +214,6 @@ namespace MoodyBlues.EditorTools
                 return null;
             }
 
-            MoodyBluesClientConfig config = manager.Config;
-            if (config == null)
-            {
-                Debug.LogWarning($"MoodyBlues: the MoodyBluesSessionManager in '{scene.path}' has no config, so the export has nowhere to go.");
-                return null;
-            }
-
             string sceneId = AssetDatabase.AssetPathToGUID(scene.path);
             if (string.IsNullOrEmpty(sceneId))
             {
@@ -247,8 +254,6 @@ namespace MoodyBlues.EditorTools
                     sceneHash = sceneHash,
                     scenePath = scene.path,
                     sceneName = scene.name,
-                    developerId = config.DeveloperId,
-                    backendBaseUrl = config.BackendBaseUrl,
                     skippedMeshes = skippedMeshes,
                     createdUtc = DateTime.UtcNow.ToString("o"),
                 };
@@ -335,10 +340,16 @@ namespace MoodyBlues.EditorTools
         {
             try
             {
+                if (!MoodyBluesProjectSettings.TryGetConnection(out MoodyBluesConnection connection, out string error))
+                {
+                    Debug.LogWarning($"MoodyBlues: {exports.Count} scene export(s) not uploaded. {error} Then use MoodyBlues > Upload Pending Exports.");
+                    return;
+                }
+
                 int uploaded = 0, alreadyThere = 0, failed = 0;
                 foreach (SavedExport saved in exports)
                 {
-                    switch (await UploadAsync(saved))
+                    switch (await UploadAsync(saved, connection))
                     {
                         case SceneSendResult.Uploaded: uploaded++; break;
                         case SceneSendResult.AlreadyOnServer: alreadyThere++; break;
@@ -346,8 +357,8 @@ namespace MoodyBlues.EditorTools
                     }
                 }
 
-                string summary = $"MoodyBlues: scene upload finished - {uploaded} uploaded, {alreadyThere} already on the server, {failed} failed.";
-                if (failed > 0) Debug.LogWarning(summary + " Failed exports are kept; retry with Tools > MoodyBlues > Upload Pending Exports.");
+                string summary = $"MoodyBlues: scene upload to {connection.DisplayHost} finished - {uploaded} uploaded, {alreadyThere} already on the server, {failed} failed.";
+                if (failed > 0) Debug.LogWarning(summary + " Failed exports are kept; retry with MoodyBlues > Upload Pending Exports.");
                 else Debug.Log(summary);
             }
             catch (Exception ex)
@@ -356,26 +367,23 @@ namespace MoodyBlues.EditorTools
             }
         }
 
-        private static async Task<SceneSendResult> UploadAsync(SavedExport saved)
+        /// <summary>
+        /// Checks one saved export against the project's backend and uploads it if missing. The
+        /// connection is the project's current one, not the one at export time, so an export made
+        /// before the key was rotated (or before the project was connected) still goes through.
+        /// </summary>
+        private static async Task<SceneSendResult> UploadAsync(SavedExport saved, MoodyBluesConnection connection)
         {
-            if (string.IsNullOrEmpty(saved.developerId) || string.IsNullOrEmpty(saved.backendBaseUrl))
-            {
-                Debug.LogWarning($"MoodyBlues: the export of '{saved.sceneName}' has no developer ID or backend URL (check its config).");
-                return SceneSendResult.Failed;
-            }
-
             var request = new SceneCheckRequest
             {
-                developerId = saved.developerId,
                 sceneId = saved.sceneId,
                 sceneHash = saved.sceneHash,
             };
 
-            SceneCheckResponse check = await MoodyBluesHandshakeClient.CheckSceneAsync(
-                saved.backendBaseUrl, request, DateTime.UtcNow + CheckTimeout);
+            SceneCheckResponse check = await MoodyBluesHandshakeClient.CheckSceneAsync(connection, request, DateTime.UtcNow + CheckTimeout);
             if (check == null)
             {
-                Debug.LogWarning($"MoodyBlues: could not reach the backend to upload '{saved.sceneName}'.");
+                Debug.LogWarning($"MoodyBlues: could not upload '{saved.sceneName}' (the scene check failed; see the error above).");
                 return SceneSendResult.Failed;
             }
 
@@ -386,7 +394,7 @@ namespace MoodyBlues.EditorTools
             }
 
             byte[] glb = File.ReadAllBytes(saved.GlbPath);
-            if (!await MoodyBluesHandshakeClient.UploadSceneAsync(check.sceneUploadUrl, glb, saved.skippedMeshes))
+            if (!await MoodyBluesHandshakeClient.UploadSceneAsync(check.sceneUploadUrl, connection.IngestKey, glb, saved.skippedMeshes))
             {
                 return SceneSendResult.Failed;
             }

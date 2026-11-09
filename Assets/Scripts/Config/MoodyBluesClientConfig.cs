@@ -29,8 +29,9 @@ namespace MoodyBlues
     }
 
     /// <summary>
-    /// Per-scene recorder settings (see Spec.md Section 9). Each scene that records gets its own
-    /// asset, assigned to that scene's MoodyBluesSessionManager.
+    /// Per-scene recorder settings (see Spec.md Section 9). Optional: a MoodyBluesSessionManager
+    /// without one uses these defaults. The backend connection is not here; it is set once for the
+    /// whole project in MoodyBlues > Settings (<see cref="MoodyBluesProjectSettings"/>).
     /// </summary>
     [CreateAssetMenu(fileName = "MoodyBluesSceneConfig", menuName = "MoodyBlues/Scene Config")]
     public class MoodyBluesClientConfig : ScriptableObject
@@ -43,13 +44,6 @@ namespace MoodyBlues
         public const float DefaultDeltaRotationComponentRange = 0.5f;
         public const float DefaultDeltaSingleAxisAngleRange = 2f;
         public const float DefaultDeltaScaleRange = 1f;
-
-        [Header("Backend")]
-        [Tooltip("Identifies this developer/build to the backend.")]
-        [SerializeField] private string developerId = "";
-
-        [Tooltip("Base HTTP URL of the backend (no trailing slash), e.g. http://localhost:8765")]
-        [SerializeField] private string backendBaseUrl = "http://localhost:8765";
 
         [Header("Recording")]
         [Tooltip("Master switch. Turn off to ship a build that never records or contacts the backend.")]
@@ -67,12 +61,12 @@ namespace MoodyBlues
         [Header("Scene Export")]
         [Tooltip("When a Player is built, export this scene in the Editor and upload it if the server " +
                  "does not have this version. Needs no Read/Write on meshes. A failed upload only warns; " +
-                 "use Tools > MoodyBlues > Upload Pending Exports later.")]
+                 "use MoodyBlues > Upload Pending Exports later.")]
         [SerializeField] private bool exportSceneOnBuild = true;
 
         [Tooltip("If the server does not have this scene version when the game starts, export it in the " +
                  "running game and upload it.\n\nCost: every model in this scene must have Read/Write " +
-                 "enabled (Tools > MoodyBlues > Make Scene Meshes Readable does it, and builds do it " +
+                 "enabled (MoodyBlues > Make Scene Meshes Readable does it, and builds do it " +
                  "automatically). That keeps a CPU copy of each mesh in memory, roughly doubling mesh " +
                  "memory on Quest. Statically batched meshes cannot be exported at runtime.")]
         [SerializeField] private bool exportSceneOnRuntimeStart = false;
@@ -83,7 +77,7 @@ namespace MoodyBlues
         [SerializeField] private bool alwaysExportAtRuntime = false;
 
         [Tooltip("Let the runtime export also run in Editor Play mode. Off: in the Editor, export with " +
-                 "Tools > MoodyBlues instead.")]
+                 "the MoodyBlues menu instead.")]
         [SerializeField] private bool exportSceneFromEditor = false;
 
         // ---- Quantization ranges --------------------------------------------------------------
@@ -125,8 +119,6 @@ namespace MoodyBlues
         [Tooltip("Max local scale change per capture tick.")]
         [SerializeField] private float deltaScaleRange = DefaultDeltaScaleRange;
 
-        public string DeveloperId => developerId;
-        public string BackendBaseUrl => backendBaseUrl;
         public bool RecordingEnabled => recordingEnabled;
         public RecordingMode RecordingMode => recordingMode;
         public int MessageSizeBytes => (int)messageSize * 1024;

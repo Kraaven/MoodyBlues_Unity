@@ -17,7 +17,7 @@ namespace MoodyBlues
         /// <summary>Tells the backend how many meshes the export had to leave out.</summary>
         public const string SkippedMeshesHeader = "X-MoodyBlues-Skipped-Meshes";
 
-        public static async Task UploadAsync(string sceneUploadUrl, byte[] glbBytes, int skippedMeshes = 0)
+        public static async Task UploadAsync(string sceneUploadUrl, string ingestKey, byte[] glbBytes, int skippedMeshes = 0)
         {
             byte[] body = Gzip(glbBytes);
 
@@ -28,6 +28,7 @@ namespace MoodyBlues
             };
             req.SetRequestHeader("Content-Type", "model/gltf-binary");
             req.SetRequestHeader("Content-Encoding", "gzip");
+            MoodyBluesHandshakeClient.SetIngestKey(req, ingestKey);
             if (skippedMeshes > 0) req.SetRequestHeader(SkippedMeshesHeader, skippedMeshes.ToString());
 
             var tcs = new TaskCompletionSource<bool>();
@@ -37,7 +38,7 @@ namespace MoodyBlues
 
             if (req.result != UnityWebRequest.Result.Success)
             {
-                throw new Exception($"SceneUploadClient: upload to '{sceneUploadUrl}' failed - {req.error}");
+                throw new Exception($"SceneUploadClient: upload to '{sceneUploadUrl}' failed ({req.responseCode}) - {req.error} {req.downloadHandler?.text}");
             }
         }
 

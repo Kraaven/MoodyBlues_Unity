@@ -3,14 +3,13 @@ using System;
 namespace MoodyBlues
 {
     /// <summary>
-    /// Wire DTOs for the backend handshake (see Spec.md Section 9). Field names/casing must match
+    /// Wire DTOs for the backend handshake (see Spec.md Section 13). Field names/casing must match
     /// the backend's JSON contract exactly -- JsonUtility maps them verbatim, no [JsonProperty]
-    /// renaming is applied.
+    /// renaming is applied. The project is identified by the ingest key header, not by a field.
     /// </summary>
     [Serializable]
     public class HandshakeRequest
     {
-        public string developerId;
         public string sceneId;
         public string sceneHash;
         public string sessionId;
@@ -20,6 +19,8 @@ namespace MoodyBlues
     public class HandshakeResponse
     {
         public string webSocketUrl;
+        /// <summary>Secret for this session's WebSocket, sent in the X-MoodyBlues-Stream-Token header.</summary>
+        public string streamToken;
         public bool sceneUploadRequired;
         public string sceneUploadUrl;
     }
@@ -31,7 +32,6 @@ namespace MoodyBlues
     [Serializable]
     public class SceneCheckRequest
     {
-        public string developerId;
         public string sceneId;
         public string sceneHash;
     }
@@ -41,5 +41,12 @@ namespace MoodyBlues
     {
         public bool sceneUploadRequired;
         public string sceneUploadUrl;
+    }
+
+    /// <summary>GET /connection (Spec.md Section 13.6): the project the ingest key belongs to.</summary>
+    [Serializable]
+    public class ConnectionResponse
+    {
+        public string projectName;
     }
 }

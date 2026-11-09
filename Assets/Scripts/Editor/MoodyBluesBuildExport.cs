@@ -14,7 +14,7 @@ namespace MoodyBlues.EditorTools
     /// - scenes with both export settings off get a warning.
     ///
     /// Nothing here can fail the build. A failed export only warns, and anything not uploaded
-    /// stays in Library/MoodyBlues/Exports for Tools > MoodyBlues > Upload Pending Exports.
+    /// stays in Library/MoodyBlues/Exports for MoodyBlues > Upload Pending Exports.
     ///
     /// A pre-build step rather than a per-scene build callback: Unity skips per-scene callbacks for
     /// scenes it has cached from an earlier build.
@@ -31,7 +31,7 @@ namespace MoodyBlues.EditorTools
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"MoodyBlues: build-time scene export failed - {ex}. Export later with Tools > MoodyBlues.");
+                Debug.LogWarning($"MoodyBlues: build-time scene export failed - {ex}. Export later from the MoodyBlues menu.");
             }
         }
 
@@ -39,6 +39,12 @@ namespace MoodyBlues.EditorTools
         {
             List<string> scenes = MoodyBluesSceneExport.FindRecorderScenesInBuild();
             if (scenes.Count == 0) return;
+
+            if (!MoodyBluesProjectSettings.TryGetConnection(out _, out string connectionError))
+            {
+                // Exports are still made and saved; Upload Pending Exports sends them once connected.
+                Debug.LogWarning($"MoodyBlues: {connectionError} This build will not record, and its scene exports are kept for Upload Pending Exports.");
+            }
 
             List<string> runtimeExportScenes = MoodyBluesMeshReadability.ScenesWithRuntimeExport(scenes);
             if (runtimeExportScenes.Count > 0)
@@ -55,14 +61,13 @@ namespace MoodyBlues.EditorTools
             var toExport = new List<string>();
             foreach (string path in scenes)
             {
-                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekConfig(path);
-                if (config == null) continue;
+                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekSettings(path);
 
                 if (!config.ExportSceneOnBuild && !config.ExportSceneOnRuntimeStart)
                 {
                     Debug.LogWarning(
                         $"MoodyBlues: '{path}' has scene export switched off. Its recordings wait on the backend until " +
-                        "you export it with Tools > MoodyBlues > Export This Scene.");
+                        "you export it with MoodyBlues > Export This Scene.");
                 }
                 else if (config.ExportSceneOnBuild && !config.AlwaysExportAtRuntime)
                 {

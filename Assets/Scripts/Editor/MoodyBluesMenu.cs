@@ -8,14 +8,24 @@ using UnityEngine.SceneManagement;
 
 namespace MoodyBlues.EditorTools
 {
-    /// <summary>Everything MoodyBlues adds to the Editor lives under Tools > MoodyBlues.</summary>
+    /// <summary>
+    /// Everything MoodyBlues adds to the Editor lives in the top-level MoodyBlues menu: settings and
+    /// the connection test first, then scene export, then checks. The same tools are buttons on the
+    /// Project Settings > MoodyBlues page.
+    /// </summary>
     public static class MoodyBluesMenu
     {
-        private const string Root = "Tools/MoodyBlues/";
+        internal const string Root = "MoodyBlues/";
         private const string Title = "MoodyBlues";
 
-        [MenuItem(Root + "Export This Scene", priority = 0)]
-        private static void ExportThisScene()
+        [MenuItem(Root + "Settings...", priority = 0)]
+        internal static void OpenSettings() => MoodyBluesSettingsProvider.Open();
+
+        [MenuItem(Root + "Test Connection", priority = 1)]
+        internal static void TestConnection() => MoodyBluesSettingsProvider.TestConnectionAndReport();
+
+        [MenuItem(Root + "Export This Scene", priority = 20)]
+        internal static void ExportThisScene()
         {
             Scene active = SceneManager.GetActiveScene();
             if (string.IsNullOrEmpty(active.path))
@@ -34,8 +44,8 @@ namespace MoodyBlues.EditorTools
             ExportAndUpload(new List<string> { active.path });
         }
 
-        [MenuItem(Root + "Export All Scenes", priority = 1)]
-        private static void ExportAllScenes()
+        [MenuItem(Root + "Export All Scenes", priority = 21)]
+        internal static void ExportAllScenes()
         {
             List<string> scenes = MoodyBluesSceneExport.FindRecorderScenesInProject();
             if (scenes.Count == 0)
@@ -53,8 +63,8 @@ namespace MoodyBlues.EditorTools
             ExportAndUpload(scenes);
         }
 
-        [MenuItem(Root + "Upload Pending Exports", priority = 2)]
-        private static void UploadPendingExports()
+        [MenuItem(Root + "Upload Pending Exports", priority = 22)]
+        internal static void UploadPendingExports()
         {
             List<MoodyBluesSceneExport.SavedExport> pending = MoodyBluesSceneExport.LoadSavedExports();
             if (pending.Count == 0)
@@ -67,8 +77,8 @@ namespace MoodyBlues.EditorTools
             MoodyBluesSceneExport.UploadInBackground(pending);
         }
 
-        [MenuItem(Root + "Make Scene Meshes Readable", priority = 20)]
-        private static void MakeSceneMeshesReadable()
+        [MenuItem(Root + "Make Scene Meshes Readable", priority = 40)]
+        internal static void MakeSceneMeshesReadable()
         {
             List<string> scenes = MoodyBluesMeshReadability.ScenesWithRuntimeExport(MoodyBluesSceneExport.FindRecorderScenesInProject());
             if (scenes.Count == 0)
@@ -101,8 +111,8 @@ namespace MoodyBlues.EditorTools
             Debug.Log($"MoodyBlues: enabled Read/Write on {changed} model(s), about {MoodyBluesMeshReadability.FormatBytes(bytes)} of extra mesh memory.");
         }
 
-        [MenuItem(Root + "Validate Scenes", priority = 21)]
-        private static void ValidateScenes()
+        [MenuItem(Root + "Validate Scenes", priority = 41)]
+        internal static void ValidateScenes()
         {
             List<string> scenes = MoodyBluesSceneExport.FindRecorderScenesInProject();
             if (scenes.Count == 0)
@@ -116,19 +126,30 @@ namespace MoodyBlues.EditorTools
             var report = new StringBuilder();
             int issues = 0;
 
+            if (!MoodyBluesProjectSettings.TryGetConnection(out _, out string connectionError))
+            {
+                report.AppendLine($"Project: {connectionError}");
+                issues++;
+            }
+
             foreach (string path in scenes)
             {
-                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekConfig(path);
-                if (config == null)
+                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekSettings(path);
+
+                foreach (string dependency in AssetDatabase.GetDependencies(path, recursive: true))
                 {
-                    report.AppendLine($"{path}: the recorder has no config, so nothing is recorded.");
-                    issues++;
-                    continue;
+                    // Optimize Game Objects removes the bone Transforms, so the recorder has
+                    // nothing to track and the replay shows the character in its bind pose.
+                    if (AssetImporter.GetAtPath(dependency) is ModelImporter importer && importer.optimizeGameObjects)
+                    {
+                        report.AppendLine($"{path}: model '{dependency}' has Optimize Game Objects on (Rig tab), so its bones are not recorded and the replay will not animate it.");
+                        issues++;
+                    }
                 }
 
                 if (!config.ExportSceneOnBuild && !config.ExportSceneOnRuntimeStart)
                 {
-                    report.AppendLine($"{path}: both export settings are off. Export it with Tools > MoodyBlues > Export This Scene.");
+                    report.AppendLine($"{path}: both export settings are off. Export it with MoodyBlues > Export This Scene.");
                     issues++;
                 }
 
@@ -144,8 +165,8 @@ namespace MoodyBlues.EditorTools
 
             bool opened = MoodyBluesSceneExport.WithEachSceneOpen(scenes, scene =>
             {
-                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekConfig(scene.path);
-                bool runtimeExport = config != null && config.ExportSceneOnRuntimeStart;
+                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekSettings(scene.path);
+                bool runtimeExport = config.ExportSceneOnRuntimeStart;
                 issues += ValidateOpenScene(scene, runtimeExport, report);
             }, "Validate Scenes");
 

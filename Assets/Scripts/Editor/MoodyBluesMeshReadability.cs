@@ -37,8 +37,8 @@ namespace MoodyBlues.EditorTools
             var result = new List<string>();
             foreach (string path in scenePaths)
             {
-                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekConfig(path);
-                if (config != null && config.ExportSceneOnRuntimeStart) result.Add(path);
+                MoodyBluesClientConfig config = MoodyBluesSceneExport.PeekSettings(path);
+                if (config.ExportSceneOnRuntimeStart) result.Add(path);
             }
             return result;
         }

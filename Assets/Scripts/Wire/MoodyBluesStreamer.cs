@@ -79,6 +79,8 @@ namespace MoodyBlues
         private bool _shuttingDown;
 
         private readonly Uri _webSocketUri;
+        // Sent as a header, not in the URL, so it stays out of proxy and access logs.
+        private readonly string _streamToken;
         private readonly float _captureHz;
         private bool _disposed;
 
@@ -96,9 +98,10 @@ namespace MoodyBlues
 
         public bool IsConnected => _socket != null && _socket.State == WebSocketState.Open;
 
-        public MoodyBluesStreamer(Uri webSocketUri, float captureHz, int packetSize = DefaultPacketSize)
+        public MoodyBluesStreamer(Uri webSocketUri, string streamToken, float captureHz, int packetSize = DefaultPacketSize)
         {
             _webSocketUri = webSocketUri;
+            _streamToken = streamToken;
             _captureHz = captureHz;
             PacketSize = Math.Max(1024, packetSize);
             _accumulator = new RingBufferAccumulator(Math.Max(MinRingBufferCapacity, PacketSize * RingBufferMessages));
@@ -134,6 +137,10 @@ namespace MoodyBlues
 
             _socket?.Dispose();
             _socket = new ClientWebSocket();
+            if (!string.IsNullOrEmpty(_streamToken))
+            {
+                _socket.Options.SetRequestHeader(MoodyBluesHandshakeClient.StreamTokenHeader, _streamToken);
+            }
 
             try
             {
