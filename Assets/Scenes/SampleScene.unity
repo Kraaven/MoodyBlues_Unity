@@ -337,7 +337,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1 &295452678
 GameObject:
@@ -444,7 +444,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: '::'
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1 &300868511
 GameObject:
@@ -552,7 +552,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1 &330585543
 GameObject:
@@ -1037,7 +1037,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1 &1097130149
 GameObject:
@@ -1144,7 +1144,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1 &1107350536
 GameObject:
@@ -1251,7 +1251,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1 &1271060147
 GameObject:
@@ -1498,7 +1498,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1 &1442346665
 GameObject:
@@ -1532,6 +1532,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: '::'
   config: {fileID: 11400000, guid: c516a56bcce143c08e42f0257c1e3cb2, type: 2}
+  captureHz: 40
+  useJobDiff: 1
 --- !u!4 &1442346667
 Transform:
   m_ObjectHideFlags: 0
@@ -1619,8 +1621,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5595419ab9c7eb84d98425a6e1f175a0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: '::'
+  prefabName: Ball
   maxBallCount: 5
   spawnInterval: 1.5
+  killHeight: -300
 --- !u!1 &1684483157
 GameObject:
   m_ObjectHideFlags: 0
@@ -1764,7 +1768,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 1
+  maxSpeed: 2
   speed: 0
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
