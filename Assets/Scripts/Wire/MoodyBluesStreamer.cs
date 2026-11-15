@@ -39,7 +39,7 @@ namespace MoodyBlues
         // At least 256 KB, enough for the start-of-recording snapshot of roughly 13k changed
         // objects while the socket is still connecting, and at least four messages, so a full
         // message can be sending while the next ones fill. Larger snapshots fall back to the
-        // overflow path in TryReserve.
+        // overflow handling in EventSendBuffer.TryWrite, which drops the oldest unsent events.
         private const int MinRingBufferCapacity = 256 * 1024;
         private const int RingBufferMessages = 4;
 
@@ -55,24 +55,19 @@ namespace MoodyBlues
         // Only used to receive control frames (Ping/Close), never application data -- see ReceiveLoopAsync.
         private readonly byte[] _receiveScratch = new byte[256];
 
-        private readonly RingBufferAccumulator _accumulator;
-
-        // Sizes of events committed into _accumulator, in commit order, not yet released -- lets a
-        // flush cut a WebSocket message at an exact event boundary rather than an arbitrary byte offset.
-        private readonly Queue<int> _eventSizes = new Queue<int>();
+        private readonly EventSendBuffer _buffer;
 
         // Guards the pump. Not a lock: everything here runs on the main thread except the awaited
         // SendAsync itself, so a flag is sufficient and cheaper.
         private bool _sendPumpRunning;
         private bool _sendRequested;
 
-        // The send currently on the socket that has not been released from the buffer yet, and how
-        // many buffered bytes it carries (0 for BeginSession, which bypasses the buffer). Shutdown
-        // needs these: it runs on the main thread and blocks, so the pump's continuation (which
-        // would release the chunk) cannot run until Shutdown returns. Shutdown therefore waits
-        // for this send itself and releases the chunk on the pump's behalf.
+        // The send currently on the socket that has not been released from the buffer yet; the
+        // buffer tracks how many bytes it carries (none for BeginSession, which bypasses the
+        // buffer). Shutdown needs this: it runs on the main thread and blocks, so the pump's
+        // continuation (which would release the chunk) cannot run until Shutdown returns. Shutdown
+        // therefore waits for this send itself and releases the chunk on the pump's behalf.
         private Task _inFlightSend;
-        private int _inFlightLength;
 
         // Set by Shutdown. Tells a pump that resumes afterwards that its chunk has already been
         // handled and it must not release it again or send anything more.
@@ -84,7 +79,6 @@ namespace MoodyBlues
         private readonly float _captureHz;
         private bool _disposed;
 
-        private long _droppedEventCount;
         private bool _resyncRequested;
         private bool _warnedDropping;
 
@@ -92,9 +86,6 @@ namespace MoodyBlues
 
         /// <summary>Raised on the main thread whenever <see cref="State"/> changes.</summary>
         public event Action<RecordingState> StateChanged;
-
-        /// <summary>Events discarded because the socket could not keep up. Reported in EndSession.</summary>
-        public long DroppedEventCount => _droppedEventCount;
 
         public bool IsConnected => _socket != null && _socket.State == WebSocketState.Open;
 
@@ -104,7 +95,7 @@ namespace MoodyBlues
             _streamToken = streamToken;
             _captureHz = captureHz;
             PacketSize = Math.Max(1024, packetSize);
-            _accumulator = new RingBufferAccumulator(Math.Max(MinRingBufferCapacity, PacketSize * RingBufferMessages));
+            _buffer = new EventSendBuffer(Math.Max(MinRingBufferCapacity, PacketSize * RingBufferMessages));
         }
 
         private void SetState(RecordingState state)
@@ -139,7 +130,7 @@ namespace MoodyBlues
             _socket = new ClientWebSocket();
             if (!string.IsNullOrEmpty(_streamToken))
             {
-                _socket.Options.SetRequestHeader(MoodyBluesHandshakeClient.StreamTokenHeader, _streamToken);
+                _socket.Options.SetRequestHeader(MoodyBluesHttpClient.StreamTokenHeader, _streamToken);
             }
 
             try
@@ -158,7 +149,6 @@ namespace MoodyBlues
             {
                 var scratch = new byte[Serializer.BeginSessionSize];
                 int size = Serializer.SerializeBeginSession(_captureHz, scratch);
-                _inFlightLength = 0; // not from the buffer, so nothing to release
                 _inFlightSend = _socket.SendAsync(
                     new ArraySegment<byte>(scratch, 0, size),
                     WebSocketMessageType.Binary,
@@ -343,7 +333,7 @@ namespace MoodyBlues
                 Saturate(deltaPromotions),
                 Saturate(rotationWidenings),
                 Saturate(hardClamps),
-                Saturate(_droppedEventCount),
+                Saturate(_buffer.DroppedEvents),
                 scratch);
             WriteToAccumulator(scratch);
         }
@@ -352,7 +342,7 @@ namespace MoodyBlues
             value <= 0 ? 0u : value >= uint.MaxValue ? uint.MaxValue : (uint)value;
 
         /// <summary>
-        /// Writes a developer log as one TimeStamp followed by as many 35-byte Log events as the
+        /// Writes a developer log as one TimeStamp followed by as many 32-byte Log events as the
         /// text needs. The first event carries the level and colour; the rest carry style 0, which
         /// tells the receiver to append them to the previous log. Text is split on UTF-8 character
         /// boundaries so no event ends mid-character.
@@ -391,77 +381,32 @@ namespace MoodyBlues
             return end;
         }
 
+        /// <summary>
+        /// Buffers one event, making room if necessary. Never throws: this runs inside the capture
+        /// tick, and an exception out of the buffer once it filled against a dead socket would
+        /// repeat every tick for the rest of the run.
+        /// </summary>
         private void WriteToAccumulator(ReadOnlySpan<byte> bytes)
         {
-            if (!TryReserve(bytes.Length, out Span<byte> dest)) return; // dropped; already counted
-            bytes.CopyTo(dest);
-            _accumulator.Commit(bytes.Length);
-            _eventSizes.Enqueue(bytes.Length);
-        }
-
-        /// <summary>
-        /// Reserves space, making room if necessary. Never throws: this runs inside the capture
-        /// tick, and the previous behaviour (an exception out of Reserve once the buffer filled
-        /// against a dead socket) meant a single dropped connection produced an exception every
-        /// tick for the rest of the run.
-        /// </summary>
-        private bool TryReserve(int size, out Span<byte> destination)
-        {
-            if (_accumulator.FreeBytes >= size + Serializer.MaxEventSize)
-            {
-                destination = _accumulator.Reserve(size);
-                return true;
-            }
-
             // A synchronous drain is only worth attempting when the socket can actually take it.
-            if (!_sendPumpRunning && IsConnected)
+            if (_buffer.FreeBytes < bytes.Length + Serializer.MaxEventSize && !_sendPumpRunning && IsConnected)
             {
                 FlushSync();
             }
 
-            while (_accumulator.FreeBytes < size + Serializer.MaxEventSize)
-            {
-                if (!TryDropOldestEvent())
-                {
-                    destination = default;
-                    return false;
-                }
-            }
-
-            destination = _accumulator.Reserve(size);
-            return true;
+            long droppedBefore = _buffer.DroppedEvents;
+            _buffer.TryWrite(bytes, Serializer.MaxEventSize);
+            if (_buffer.DroppedEvents != droppedBefore) OnEventsDropped();
         }
 
         /// <summary>
-        /// Discards the oldest buffered event to make room. Drop-oldest keeps the newest state,
-        /// so the recording resumes correctly after the gap rather than stopping dead.
-        ///
         /// Any drop breaks the Delta* chain: the receiver's baseline for every affected object is
         /// now whatever it had before the gap. A full absolute resync is therefore requested, and
         /// the capture tick performs it once the socket is healthy again (see
         /// ConsumeResyncRequest). Without that, everything after a drop would be silently offset.
         /// </summary>
-        private bool TryDropOldestEvent()
+        private void OnEventsDropped()
         {
-            if (_eventSizes.Count == 0) return false;
-
-            int expected = _eventSizes.Peek();
-
-            // Taking and immediately releasing reuses TryTakeFlushChunk's skip-marker handling,
-            // so the read cursor can never land mid-padding.
-            if (!_accumulator.TryTakeFlushChunk(1, expected, out ReadOnlyMemory<byte> chunk)) return false;
-            if (chunk.Length != expected)
-            {
-                // Would desync _eventSizes against the buffer; bail rather than corrupt the stream.
-                Debug.LogError(
-                    $"MoodyBluesStreamer: drop-oldest expected {expected} bytes but the buffer offered " +
-                    $"{chunk.Length}. Not dropping.");
-                return false;
-            }
-
-            _accumulator.ReleaseFlushChunk(chunk.Length);
-            _eventSizes.Dequeue();
-            _droppedEventCount++;
             _resyncRequested = true;
 
             if (!_warnedDropping)
@@ -472,8 +417,6 @@ namespace MoodyBlues
                     "An absolute resync is queued so playback recovers after the gap. Reported once per " +
                     "session; the total is in EndSession.");
             }
-
-            return true;
         }
 
         /// <summary>
@@ -499,7 +442,7 @@ namespace MoodyBlues
         /// </summary>
         public void FlushIfFull()
         {
-            if (_accumulator.ReadableBytes < PacketSize) return;
+            if (_buffer.ReadableBytes < PacketSize) return;
             PumpSendsAsync();
         }
 
@@ -510,7 +453,7 @@ namespace MoodyBlues
         /// </summary>
         public void FlushTail()
         {
-            if (_accumulator.ReadableBytes <= 0) return;
+            if (_buffer.ReadableBytes <= 0) return;
             PumpSendsAsync();
         }
 
@@ -539,7 +482,7 @@ namespace MoodyBlues
                     while (TryPrepareNextChunk(out ReadOnlyMemory<byte> chunk))
                     {
                         if (!IsConnected || _shuttingDown) return; // finally still clears _sendPumpRunning
-                        _inFlightLength = chunk.Length;
+                        _buffer.BeginSend(chunk.Length);
                         _inFlightSend = _socket.SendAsync(chunk, WebSocketMessageType.Binary, endOfMessage: true, _socketToken).AsTask();
                         await _inFlightSend;
 
@@ -548,7 +491,7 @@ namespace MoodyBlues
                         if (_shuttingDown) return;
 
                         _inFlightSend = null;
-                        ReleaseChunk(chunk.Length);
+                        _buffer.CompleteSend();
                     }
                 } while (_sendRequested && !_shuttingDown);
             }
@@ -560,7 +503,11 @@ namespace MoodyBlues
             }
             finally
             {
-                if (!_shuttingDown) _inFlightSend = null;
+                if (!_shuttingDown)
+                {
+                    _inFlightSend = null;
+                    _buffer.AbandonSend(); // a failed send stays buffered; no-op after a completed one
+                }
                 _sendPumpRunning = false;
             }
         }
@@ -584,44 +531,12 @@ namespace MoodyBlues
                     return;
                 }
 
-                ReleaseChunk(chunk.Length);
+                _buffer.Release(chunk.Length);
             }
         }
 
-        /// <summary>
-        /// Finds the longest run of whole, buffered events that fits within PacketSize and is
-        /// physically contiguous, so the resulting chunk never cuts an event in half.
-        /// </summary>
-        private bool TryPrepareNextChunk(out ReadOnlyMemory<byte> chunk)
-        {
-            int safeSize = 0;
-            foreach (int eventSize in _eventSizes)
-            {
-                if (safeSize + eventSize > PacketSize) break;
-                safeSize += eventSize;
-            }
-
-            if (safeSize <= 0)
-            {
-                chunk = ReadOnlyMemory<byte>.Empty;
-                return false;
-            }
-
-            // May still return less than safeSize if the readable region wraps -- fine, the wrap
-            // point is always event-aligned (Reserve() never lets an event straddle it).
-            return _accumulator.TryTakeFlushChunk(1, safeSize, out chunk);
-        }
-
-        private void ReleaseChunk(int length)
-        {
-            _accumulator.ReleaseFlushChunk(length);
-
-            int remaining = length;
-            while (remaining > 0 && _eventSizes.Count > 0)
-            {
-                remaining -= _eventSizes.Dequeue();
-            }
-        }
+        private bool TryPrepareNextChunk(out ReadOnlyMemory<byte> chunk) =>
+            _buffer.TryPrepareChunk(PacketSize, out chunk);
 
         #endregion
 
@@ -702,12 +617,12 @@ namespace MoodyBlues
             {
                 // Not delivered, so its chunk stays buffered for FlushAsync to retry.
                 _inFlightSend = null;
+                _buffer.AbandonSend();
                 return true;
             }
 
-            if (_inFlightLength > 0) ReleaseChunk(_inFlightLength);
+            _buffer.CompleteSend();
             _inFlightSend = null;
-            _inFlightLength = 0;
             return true;
         }
 
@@ -724,7 +639,7 @@ namespace MoodyBlues
                 if (await Task.WhenAny(send, Task.Delay(remaining)) != send) return TimedOut("final flush");
                 await send; // rethrows a failed send; ShutdownAsync reports it
 
-                ReleaseChunk(chunk.Length);
+                _buffer.Release(chunk.Length);
             }
 
             return true;
@@ -781,16 +696,12 @@ namespace MoodyBlues
                 // let FlushSync try again (it will give up quietly if the socket is broken).
                 Debug.LogWarning($"MoodyBluesStreamer: in-flight send failed at shutdown - {ex.GetBaseException().Message}");
                 _inFlightSend = null;
+                _buffer.AbandonSend();
                 return true;
             }
 
-            if (_inFlightLength > 0)
-            {
-                ReleaseChunk(_inFlightLength);
-            }
-
+            _buffer.CompleteSend();
             _inFlightSend = null;
-            _inFlightLength = 0;
             return true;
         }
 

@@ -66,9 +66,7 @@ namespace MoodyBlues
         /// </summary>
         public static string Combine(string contentHash, string structuralHash, string exportHash = null)
         {
-            string text = $"content:{contentHash ?? ""}\nstructure:{structuralHash}\nexport:{exportHash ?? ""}";
-            using var sha256 = SHA256.Create();
-            return ToLowerHex(sha256.ComputeHash(Encoding.UTF8.GetBytes(text)));
+            return HashText($"content:{contentHash ?? ""}\nstructure:{structuralHash}\nexport:{exportHash ?? ""}");
         }
 
         public static string HashBytes(byte[] bytes)
@@ -76,6 +74,8 @@ namespace MoodyBlues
             using var sha256 = SHA256.Create();
             return ToLowerHex(sha256.ComputeHash(bytes));
         }
+
+        public static string HashText(string text) => HashBytes(Encoding.UTF8.GetBytes(text));
 
         private static string ComputeStructuralHash(string sceneName, IReadOnlyList<ushort> objectIds, IReadOnlyList<Transform> transforms)
         {

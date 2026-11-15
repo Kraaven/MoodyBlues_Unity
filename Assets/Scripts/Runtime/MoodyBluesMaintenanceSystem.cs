@@ -47,8 +47,6 @@ namespace MoodyBlues
         private bool _reconnecting;
         private int _reconnectAttempt;
 
-        public MoodyBluesStreamer Streamer => _streamer;
-
         public MoodyBluesMaintenanceSystem(MoodyBluesStreamer streamer)
         {
             _streamer = streamer;

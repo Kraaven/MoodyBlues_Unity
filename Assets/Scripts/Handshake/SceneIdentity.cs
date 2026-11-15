@@ -7,7 +7,7 @@ using UnityEditor;
 namespace MoodyBlues
 {
     /// <summary>
-    /// Holds the current scene's stable, backend-facing SceneId (see Spec.md Section 9). This is
+    /// Holds the current scene's stable, backend-facing SceneId (see Spec.md Section 13). This is
     /// Unity's own scene-asset GUID, so it never needs manual bookkeeping. In the Editor (including
     /// Play Mode) it's resolved live via AssetDatabase; in a built Player it's read from the
     /// BakedSceneId component that SceneIdentityBuildProcessor stamps into the scene at build time.

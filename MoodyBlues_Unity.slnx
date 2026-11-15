@@ -1,0 +1,6 @@
+﻿<Solution>
+  <Project Path="MoodyBlues.Tests.EditMode.csproj" />
+  <Project Path="MoodyBlues.Samples.csproj" />
+  <Project Path="MoodyBlues.csproj" />
+  <Project Path="MoodyBlues.EditorTools.csproj" />
+</Solution>

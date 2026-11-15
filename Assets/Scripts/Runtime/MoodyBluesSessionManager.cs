@@ -69,12 +69,6 @@ namespace MoodyBlues
         [Range(1f, 120f)]
         private float captureHz = DefaultCaptureHz;
 
-        [SerializeField]
-        [Tooltip("Run the per-tick transform diff as a Burst job across worker threads. Turn off " +
-                 "to compare against the single-threaded path; see the benchmark notes in Spec.md. " +
-                 "The two produce identical output.")]
-        private bool useJobDiff = true;
-
         public static MoodyBluesSessionManager Instance { get; private set; }
 
         // ---- Identity -------------------------------------------------------------------------
@@ -269,14 +263,7 @@ namespace MoodyBlues
                     "to recover from dropped events.");
             }
 
-            if (useJobDiff)
-            {
-                RunDiffJob();
-            }
-            else
-            {
-                RunDiffMainThread();
-            }
+            RunDiffJob();
 
             SerializeChangedTransforms();
             DataStreamer.FlushIfFull();
@@ -347,38 +334,6 @@ namespace MoodyBlues
             job.ScheduleReadOnly(_transforms, DiffJobBatchSize).Complete();
         }
 
-        /// <summary>
-        /// Single-threaded equivalent of <see cref="TransformDiffJob"/>, byte-for-byte identical in
-        /// output. Kept as the comparison baseline for the capture-cost benchmark, and as a
-        /// fallback if Burst is unavailable on some target.
-        /// </summary>
-        private void RunDiffMainThread()
-        {
-            int count = _transforms.length;
-            for (int i = 0; i < count; i++)
-            {
-                Transform t = _transforms[i];
-                Vector3 position = t.localPosition;
-                Quaternion rotation = t.localRotation;
-                Vector3 scale = t.localScale;
-
-                TrackedState last = _states[i];
-
-                byte mask = 0;
-                if (TransformEventDispatcher.HasPositionChanged(position, last.LastSentPosition)) mask |= SampledTransform.PositionChangedBit;
-                if (TransformEventDispatcher.HasRotationChanged(rotation, last.LastSentRotation)) mask |= SampledTransform.RotationChangedBit;
-                if (TransformEventDispatcher.HasScaleChanged(scale, last.LastSentScale)) mask |= SampledTransform.ScaleChangedBit;
-
-                _sampled[i] = new SampledTransform
-                {
-                    Position = position,
-                    Rotation = rotation,
-                    Scale = scale,
-                    ChangedMask = mask,
-                };
-            }
-        }
-
         private void SerializeChangedTransforms()
         {
             // Set the first time this tick actually enqueues something, so exactly one TimeStamp
@@ -423,17 +378,7 @@ namespace MoodyBlues
 
                 AccumulateEncodeDiagnostics(encoded, _objectIds[i]);
 
-                // Store what the RECEIVER will reconstruct, not the true float. Delta* events are
-                // integrated by the receiver, so feeding the true value back here would leave the
-                // two sides' baselines permanently diverging and let the rounding error compound
-                // every tick. With the encoded value as the baseline, error stays pinned at a
-                // single quantization step no matter how long the session runs.
-                _states[i] = new TrackedState
-                {
-                    LastSentPosition = encoded.Position,
-                    LastSentRotation = encoded.Rotation,
-                    LastSentScale = encoded.Scale,
-                };
+                _states[i] = TrackedState.From(encoded);
             }
         }
 
@@ -555,6 +500,17 @@ namespace MoodyBlues
 
         // ---- Public registry API --------------------------------------------------------------
 
+        private void WarnIdsExhausted()
+        {
+            if (_warnedIdExhaustion) return;
+            _warnedIdExhaustion = true;
+            Debug.LogError(
+                $"MoodyBluesSessionManager: exhausted the {ushort.MaxValue}-ObjectID space for this " +
+                "session. Further objects will not be recorded. IDs are never reused, so a session " +
+                "that spawns and destroys continuously will eventually reach this -- pool and reuse " +
+                "spawned objects instead of destroying them, or shorten the session.");
+        }
+
         /// <summary>
         /// Registers a whole spawned subtree as one block of consecutive ObjectIDs, in the order
         /// given (walk order, root first). A receiver maps the block onto the template's subtree by
@@ -567,14 +523,7 @@ namespace MoodyBlues
 
             if (_nextObjectId + nodes.Count - 1 > ushort.MaxValue)
             {
-                if (!_warnedIdExhaustion)
-                {
-                    _warnedIdExhaustion = true;
-                    Debug.LogError(
-                        $"MoodyBluesSessionManager: not enough ObjectIDs left for a {nodes.Count}-object spawn. " +
-                        "Further spawns will not be recorded. IDs are never reused -- pool and reuse spawned " +
-                        "objects instead of destroying them, or shorten the session.");
-                }
+                WarnIdsExhausted();
                 return 0;
             }
 
@@ -612,6 +561,8 @@ namespace MoodyBlues
             Quaternion rotation = t.localRotation;
             Vector3 scale = t.localScale;
 
+            var assumed = new TrackedState { LastSentPosition = assumedPosition, LastSentRotation = assumedRotation, LastSentScale = assumedScale };
+
             bool changed =
                 TransformEventDispatcher.HasPositionChanged(position, assumedPosition) ||
                 TransformEventDispatcher.HasRotationChanged(rotation, assumedRotation) ||
@@ -619,10 +570,22 @@ namespace MoodyBlues
             if (!changed)
             {
                 // The receiver holds the template pose; keep the baseline identical to it.
-                SetBaseline(id, new TrackedState { LastSentPosition = assumedPosition, LastSentRotation = assumedRotation, LastSentScale = assumedScale });
+                SetBaseline(id, assumed);
                 return false;
             }
 
+            var current = new TrackedState { LastSentPosition = position, LastSentRotation = rotation, LastSentScale = scale };
+            SetBaseline(id, SendAbsolute(streamer, id, current, assumed, out bool wrote));
+            return wrote;
+        }
+
+        /// <summary>
+        /// Sends <paramref name="current"/> as an absolute transform and returns the baseline the
+        /// receiver now holds. <paramref name="previous"/> is what it held before; it is returned
+        /// unchanged, and <paramref name="wrote"/> is false, if nothing could be written.
+        /// </summary>
+        private TrackedState SendAbsolute(MoodyBluesStreamer streamer, ushort id, in TrackedState current, in TrackedState previous, out bool wrote)
+        {
             var data = new TransformData
             {
                 ObjectId = id,
@@ -630,28 +593,30 @@ namespace MoodyBlues
                 PositionChanged = true,
                 RotationChanged = true,
                 ScaleChanged = true,
-                currentPosition = position,
-                currentRotation = rotation,
-                currentScale = scale,
-                previousPosition = assumedPosition,
-                previousRotation = assumedRotation,
-                previousScale = assumedScale,
+                currentPosition = current.LastSentPosition,
+                currentRotation = current.LastSentRotation,
+                currentScale = current.LastSentScale,
+
+                // Populated even though SendTrue events are absolute: the encode result carries
+                // the post-event baseline forward for any property the chosen event doesn't
+                // happen to transmit, and it can only do that if it starts from real values.
+                previousPosition = previous.LastSentPosition,
+                previousRotation = previous.LastSentRotation,
+                previousScale = previous.LastSentScale,
             };
 
             TransformEncodeResult encoded = streamer.EnqueueTransform(data);
-            if (!encoded.Wrote) return false;
+            wrote = encoded.Wrote;
+            if (!wrote) return previous;
 
             AccumulateEncodeDiagnostics(encoded, id);
-            SetBaseline(id, new TrackedState
-            {
-                LastSentPosition = encoded.Position,
-                LastSentRotation = encoded.Rotation,
-                LastSentScale = encoded.Scale,
-            });
-            return true;
+            return TrackedState.From(encoded);
         }
 
-        /// <summary>Sets an object's delta baseline, whether it is in the capture set yet or still pending.</summary>
+        /// <summary>
+        /// Sets an object's delta baseline, whether it is in the capture set yet or still pending
+        /// (registered this frame, so its seed holds the values from before this event).
+        /// </summary>
         private void SetBaseline(ushort id, TrackedState state)
         {
             if (_indexById.TryGetValue(id, out int index))
@@ -694,15 +659,7 @@ namespace MoodyBlues
             // padding. Refusing to allocate is recoverable; corrupting the stream is not.
             if (_nextObjectId > ushort.MaxValue)
             {
-                if (!_warnedIdExhaustion)
-                {
-                    _warnedIdExhaustion = true;
-                    Debug.LogError(
-                        $"MoodyBluesSessionManager: exhausted the {ushort.MaxValue}-ObjectID space for this " +
-                        "session. Further objects will not be recorded. IDs are never reused, so a session " +
-                        "that spawns and destroys continuously will eventually reach this -- pool and reuse " +
-                        "spawned objects instead of destroying them, or shorten the session.");
-                }
+                WarnIdsExhausted();
                 return 0;
             }
 
@@ -781,33 +738,8 @@ namespace MoodyBlues
 
             if (!positionChanged && !rotationChanged && !scaleChanged) return;
 
-            var data = new TransformData
-            {
-                ObjectId = id,
-                SendTrue = true,
-                currentPosition = position,
-                currentRotation = rotation,
-                currentScale = scale,
-
-                // Populated even though SendTrue events are absolute: the encode result carries
-                // the post-event baseline forward for any property the chosen event doesn't
-                // happen to transmit, and it can only do that if it starts from real values.
-                previousPosition = last.LastSentPosition,
-                previousRotation = last.LastSentRotation,
-                previousScale = last.LastSentScale,
-            };
-
-            TransformEncodeResult encoded = DataStreamer.EnqueueTransform(data);
-            if (!encoded.Wrote) return;
-
-            AccumulateEncodeDiagnostics(encoded, id);
-
-            _states[index] = new TrackedState
-            {
-                LastSentPosition = encoded.Position,
-                LastSentRotation = encoded.Rotation,
-                LastSentScale = encoded.Scale,
-            };
+            var current = new TrackedState { LastSentPosition = position, LastSentRotation = rotation, LastSentScale = scale };
+            _states[index] = SendAbsolute(DataStreamer, id, current, last, out _);
         }
 
         /// <summary>
@@ -873,38 +805,7 @@ namespace MoodyBlues
 
             // Re-baseline, or the first delta after the reparent would be measured against the
             // old parent's space.
-            if (_indexById.TryGetValue(id, out int index))
-            {
-                _states[index] = new TrackedState
-                {
-                    LastSentPosition = encoded.Position,
-                    LastSentRotation = encoded.Rotation,
-                    LastSentScale = encoded.Scale,
-                };
-                return;
-            }
-
-            // Registered this frame and still queued, so its seed holds the pre-reparent values.
-            RebaselinePendingRegistration(id, encoded);
-        }
-
-        private void RebaselinePendingRegistration(ushort id, in TransformEncodeResult encoded)
-        {
-            for (int i = 0; i < _pendingRegistrations.Count; i++)
-            {
-                if (_pendingRegistrations[i].ObjectId != id) continue;
-
-                _pendingRegistrations[i] = new PendingRegistration(
-                    id,
-                    _pendingRegistrations[i].Target,
-                    new TrackedState
-                    {
-                        LastSentPosition = encoded.Position,
-                        LastSentRotation = encoded.Rotation,
-                        LastSentScale = encoded.Scale,
-                    });
-                return;
-            }
+            SetBaseline(id, TrackedState.From(encoded));
         }
 
         // ---- Shutdown -------------------------------------------------------------------------

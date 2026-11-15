@@ -11,7 +11,7 @@ using Object = UnityEngine.Object;
 namespace MoodyBlues.EditorTools
 {
     /// <summary>
-    /// Editor-side scene export (Spec.md Section 9), shared by the build step and the
+    /// Editor-side scene export (Spec.md Section 13.3), shared by the build step and the
     /// MoodyBlues menu. For one scene it:
     ///
     /// 1. opens the scene as saved on disk;
@@ -380,7 +380,7 @@ namespace MoodyBlues.EditorTools
                 sceneHash = saved.sceneHash,
             };
 
-            SceneCheckResponse check = await MoodyBluesHandshakeClient.CheckSceneAsync(connection, request, DateTime.UtcNow + CheckTimeout);
+            SceneCheckResponse check = await MoodyBluesHttpClient.CheckSceneAsync(connection, request, DateTime.UtcNow + CheckTimeout);
             if (check == null)
             {
                 Debug.LogWarning($"MoodyBlues: could not upload '{saved.sceneName}' (the scene check failed; see the error above).");
@@ -394,7 +394,7 @@ namespace MoodyBlues.EditorTools
             }
 
             byte[] glb = File.ReadAllBytes(saved.GlbPath);
-            if (!await MoodyBluesHandshakeClient.UploadSceneAsync(check.sceneUploadUrl, connection.IngestKey, glb, saved.skippedMeshes))
+            if (!await MoodyBluesHttpClient.UploadSceneAsync(check.sceneUploadUrl, connection.IngestKey, glb, saved.skippedMeshes))
             {
                 return SceneSendResult.Failed;
             }

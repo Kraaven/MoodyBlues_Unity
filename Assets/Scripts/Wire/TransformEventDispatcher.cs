@@ -46,7 +46,7 @@ namespace MoodyBlues
     /// <summary>
     /// Picks the smallest wire event that covers whatever changed on a transform this tick and
     /// serializes it into the destination span (called from MoodyBluesStreamer.EnqueueTransform).
-    /// Event selection rules live in Spec.md Section 5.3; this class also owns the epsilon checks
+    /// Event selection rules live in Spec.md Section 6.5; this class also owns the epsilon checks
     /// (HasPositionChanged/HasRotationChanged/HasScaleChanged) that decide "did this change enough
     /// to care about" for both the caller's gating and this dispatcher's own property selection.
     ///

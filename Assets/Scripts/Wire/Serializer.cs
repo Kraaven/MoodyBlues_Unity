@@ -51,7 +51,7 @@ namespace MoodyBlues
             return MemoryMarshal.Cast<byte, UInt32>(source)[0];
         }
 
-        // Event catalog (IDs, payload layout, sizes, ranges) is documented in Spec.md Section 5.
+        // Event catalog (IDs, payload layout, sizes, ranges) is documented in Spec.md Section 6.
 
         #region Event Type
 
@@ -81,26 +81,26 @@ namespace MoodyBlues
             DeltaPositionUniformScale = 22,
             DeltaRotationUniformScale = 23,
 
-            // Session / lifecycle events -- see Spec.md Section 5.1.
+            // Session / lifecycle events -- see Spec.md Sections 6.1 and 6.2.
             TimeStamp = 24,
             ShowObject = 25,
             HideObject = 26,
             InstantiateObject = 27,
             DeleteObject = 28,
 
-            // Session maintenance -- see Spec.md Section 5.2. No envelope: these describe the
+            // Session maintenance -- see Spec.md Section 6.1. No envelope: these describe the
             // stream, not an object.
             BeginSession = 29,
             KeepAlive = 30,
             EndSession = 31,
 
             /// <summary>
-            /// A tracked object's parent changed at runtime. See Spec.md Section 5.1.
+            /// A tracked object's parent changed at runtime. See Spec.md Section 6.2.
             /// </summary>
             ReparentObject = 32,
 
             /// <summary>
-            /// A developer log line (Spec.md Section 6.7). No envelope; fixed 35 bytes. Long
+            /// A developer log line (Spec.md Section 6.7). No envelope; fixed 32 bytes. Long
             /// messages span several consecutive Log events.
             /// </summary>
             Log = 33
@@ -135,7 +135,7 @@ namespace MoodyBlues
 
         // Fixed by mathematics, not tunable:
         // 1/sqrt(2) is the largest a non-largest component of a unit quaternion can be, so it is
-        // already the tightest correct bound for smallest-three (Spec.md Section 7.5).
+        // already the tightest correct bound for smallest-three (Spec.md Section 9.5).
         private const float TrueRotationComponentRange = 0.70711f;
         private const float TrueSingleAxisAngleMin = 0f;   // a full turn is a full turn
         private const float TrueSingleAxisAngleMax = 360f;
@@ -202,7 +202,7 @@ namespace MoodyBlues
         // the common range -- but a clamped *delta* is integrated by the receiver and never
         // recovered, so the error is permanent rather than a one-frame artefact. These predicates
         // let the dispatcher detect that case up front and promote to a wider encoding instead.
-        // See Spec.md Section 7 and TransformEventDispatcher.
+        // See Spec.md Section 10.2 and TransformEventDispatcher.
 
         private static bool InRange(float v, float min, float max) => v >= min && v <= max;
 
@@ -249,13 +249,6 @@ namespace MoodyBlues
         {
             destination[0] = GetEventTypeByte(eventType);
             MemoryMarshal.Cast<byte, ushort>(destination.Slice(1, 2))[0] = objectId;
-        }
-
-        public static (EventType eventType, ushort objectId) ReadEnvelope(ReadOnlySpan<byte> source)
-        {
-            EventType eventType = (EventType)source[0];
-            ushort objectId = MemoryMarshal.Cast<byte, ushort>(source.Slice(1, 2))[0];
-            return (eventType, objectId);
         }
 
         #endregion
@@ -518,11 +511,6 @@ namespace MoodyBlues
             return DeltaRotationSize;
         }
 
-        public static Quaternion DeserializeDeltaRotation(ReadOnlySpan<byte> source)
-        {
-            return DeserializeQuaternionDropWFromBuffer(DeltaRotationComponentRange, source);
-        }
-
         public const int DeltaRotationSingleAxisSize = EnvelopeSize + 2;
         public static int SerializeDeltaRotationSingleAxis(ushort objectId, byte axisId, float angleDelta, Span<byte> destination)
         {
@@ -710,11 +698,6 @@ namespace MoodyBlues
             return TimeStampSize;
         }
 
-        public static double DeserializeTimeStamp(ReadOnlySpan<byte> source)
-        {
-            return MemoryMarshal.Cast<byte, double>(source.Slice(1, 8))[0];
-        }
-
         public const int ShowObjectSize = EnvelopeSize;
         public static int SerializeShowObject(ushort objectId, Span<byte> destination)
         {
@@ -755,21 +738,6 @@ namespace MoodyBlues
             offset += 4;
             SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(offset, 6));
             return InstantiateObjectSize;
-        }
-
-        public static (ushort templateObjectId, ushort parentObjectId, Vector3 position, Quaternion rotation, Vector3 scale) DeserializeInstantiateObject(ReadOnlySpan<byte> source)
-        {
-            int offset = EnvelopeSize;
-            ushort templateObjectId = MemoryMarshal.Cast<byte, ushort>(source.Slice(offset, 2))[0];
-            offset += 2;
-            ushort parentObjectId = MemoryMarshal.Cast<byte, ushort>(source.Slice(offset, 2))[0];
-            offset += 2;
-            Vector3 position = DeserializeVector3FromUInt16Buffer(-PositionRange, PositionRange, source.Slice(offset, 6));
-            offset += 6;
-            Quaternion rotation = DeserializeQuaternionSmallestThreeFromBuffer(TrueRotationComponentRange, source.Slice(offset, 4));
-            offset += 4;
-            Vector3 scale = DeserializeVector3FromUInt16Buffer(ScaleMin, ScaleMax, source.Slice(offset, 6));
-            return (templateObjectId, parentObjectId, position, rotation, scale);
         }
 
         /// <summary>

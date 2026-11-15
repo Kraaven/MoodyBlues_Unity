@@ -135,8 +135,8 @@ namespace MoodyBlues.Tests
         [Test]
         public void Reserve_ThrowsWhenGenuinelyFull()
         {
-            // MoodyBluesStreamer.TryReserve exists to make sure this is never reached in the live
-            // path -- it keeps MaxEventSize of headroom so a wasted tail can always be absorbed.
+            // EventSendBuffer.TryWrite exists to make sure this is never reached in the live
+            // path -- it keeps headroom free after each write so a wasted tail can always be absorbed.
             // Pinned here so that guarantee stays load-bearing rather than incidental.
             var buffer = new RingBufferAccumulator(16);
             Write(buffer, 16, 0xFF);

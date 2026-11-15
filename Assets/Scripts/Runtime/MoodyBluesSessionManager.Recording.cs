@@ -44,7 +44,7 @@ namespace MoodyBlues
 
     /// <summary>
     /// Recording lifecycle: the public recording API, the start-of-recording snapshot, and scene
-    /// upload. See Spec.md Section 9.
+    /// upload. See Spec.md Sections 8.5 and 13.
     ///
     /// The scene's ObjectIDs, capture set and scene export live for the whole run of the scene.
     /// Each StartRecording opens a new backend session on top of them: a fresh handshake, a fresh
@@ -116,9 +116,6 @@ namespace MoodyBlues
 
         /// <summary>True from StartRecording until the recording stops or fails to start.</summary>
         public bool IsRecording => _phase != RecordingPhase.Idle;
-
-        /// <summary>This scene's config asset, or null if it has none (the defaults are used).</summary>
-        public MoodyBluesClientConfig Config => config;
 
         // ---- Public API -------------------------------------------------------------------------
 
@@ -271,7 +268,7 @@ namespace MoodyBlues
                 // Already logged by SceneIdentity. Without a scene ID the backend cannot file
                 // anything, so behave as if recording were switched off.
                 _inert = true;
-                FailCallsBeforeStart();
+                RunCallsBeforeStart();
                 return;
             }
 
@@ -298,9 +295,7 @@ namespace MoodyBlues
                 AwaitSceneSend(EnsureSceneOnServerAsync(knownUploadUrl: null), null);
             }
 
-            List<Action> pending = new(_callsBeforeStart);
-            _callsBeforeStart.Clear();
-            foreach (Action call in pending) call();
+            RunCallsBeforeStart();
 
             if (config.RecordingMode == RecordingMode.StartOnLoad && _phase == RecordingPhase.Idle)
             {
@@ -308,9 +303,12 @@ namespace MoodyBlues
             }
         }
 
-        private void FailCallsBeforeStart()
+        /// <summary>
+        /// Runs everything queued while the recorder was not ready. With <c>_inert</c> set, each
+        /// queued call reports failure through its callback.
+        /// </summary>
+        private void RunCallsBeforeStart()
         {
-            // With _inert set, each queued call reports failure through its callback.
             List<Action> pending = new(_callsBeforeStart);
             _callsBeforeStart.Clear();
             foreach (Action call in pending) call();
@@ -360,7 +358,7 @@ namespace MoodyBlues
                     sessionId = Guid.NewGuid().ToString(),
                 };
 
-                HandshakeResponse response = await MoodyBluesHandshakeClient.HandshakeAsync(
+                HandshakeResponse response = await MoodyBluesHttpClient.HandshakeAsync(
                     _connection, request, _startDeadlineUtc, () => generation != _recordingGeneration);
 
                 if (generation != _recordingGeneration || this == null) return; // stopped meanwhile
@@ -638,7 +636,7 @@ namespace MoodyBlues
                 TransformEncodeResult encoded = streamer.EnqueueReparentObject(
                     id, parentId, t.localPosition, t.localRotation, t.localScale, stampTime: false);
                 AccumulateEncodeDiagnostics(encoded, id);
-                baselines[id] = ToTrackedState(encoded);
+                baselines[id] = TrackedState.From(encoded);
             }
 
             // Spawn children destroyed while idle. After the reparents, so a child that was moved out
@@ -662,7 +660,7 @@ namespace MoodyBlues
                 TransformEncodeResult encoded = streamer.EnqueueReparentObject(
                     id, parentId, t.localPosition, t.localRotation, t.localScale, stampTime: false);
                 AccumulateEncodeDiagnostics(encoded, id);
-                baselines[id] = ToTrackedState(encoded);
+                baselines[id] = TrackedState.From(encoded);
             }
 
             // 4. Moves.
@@ -687,31 +685,12 @@ namespace MoodyBlues
                     continue;
                 }
 
-                var data = new TransformData
+                baselines[id] = SendAbsolute(streamer, id, new TrackedState
                 {
-                    ObjectId = id,
-                    SendTrue = true,
-                    PositionChanged = true,
-                    RotationChanged = true,
-                    ScaleChanged = true,
-                    currentPosition = position,
-                    currentRotation = rotation,
-                    currentScale = scale,
-                    previousPosition = load.LastSentPosition,
-                    previousRotation = load.LastSentRotation,
-                    previousScale = load.LastSentScale,
-                };
-
-                TransformEncodeResult encoded = streamer.EnqueueTransform(data);
-                if (encoded.Wrote)
-                {
-                    AccumulateEncodeDiagnostics(encoded, id);
-                    baselines[id] = ToTrackedState(encoded);
-                }
-                else
-                {
-                    baselines[id] = load;
-                }
+                    LastSentPosition = position,
+                    LastSentRotation = rotation,
+                    LastSentScale = scale,
+                }, load, out _);
             }
 
             // 5. Visibility.
@@ -782,13 +761,6 @@ namespace MoodyBlues
             }
         }
 
-        private static TrackedState ToTrackedState(in TransformEncodeResult encoded) => new TrackedState
-        {
-            LastSentPosition = encoded.Position,
-            LastSentRotation = encoded.Rotation,
-            LastSentScale = encoded.Scale,
-        };
-
         // ---- Scene upload -----------------------------------------------------------------------
 
         /// <summary>
@@ -822,7 +794,7 @@ namespace MoodyBlues
                     sceneHash = _sceneHash,
                 };
 
-                SceneCheckResponse response = await MoodyBluesHandshakeClient.CheckSceneAsync(
+                SceneCheckResponse response = await MoodyBluesHttpClient.CheckSceneAsync(
                     _connection, request, DateTime.UtcNow + SceneCheckTimeout);
                 if (response == null) return SceneSendResult.Failed;
 
@@ -838,7 +810,7 @@ namespace MoodyBlues
             if (_sceneGlb == null && !TryExportForUpload()) return SceneSendResult.NotExported;
             if (_sceneGlb == null) return SceneSendResult.Failed; // the export threw; already logged
 
-            if (!await MoodyBluesHandshakeClient.UploadSceneAsync(uploadUrl, _connection.IngestKey, _sceneGlb, _sceneSkippedMeshes)) return SceneSendResult.Failed;
+            if (!await MoodyBluesHttpClient.UploadSceneAsync(uploadUrl, _connection.IngestKey, _sceneGlb, _sceneSkippedMeshes)) return SceneSendResult.Failed;
 
             MarkSceneOnServer();
             return SceneSendResult.Uploaded;

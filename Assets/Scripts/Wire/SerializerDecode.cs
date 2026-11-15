@@ -5,7 +5,7 @@ namespace MoodyBlues
 {
     /// <summary>
     /// Client-side mirror of how a receiver applies a transform event to its running per-object
-    /// state (True* events are absolute, Delta* events are cumulative -- Spec.md Section 5.3).
+    /// state (True* events are absolute, Delta* events are cumulative -- Spec.md Section 6.5).
     ///
     /// This exists so the sender can track what the receiver will *actually reconstruct* rather
     /// than what the sender knows to be true. Quantization makes those two different, and because

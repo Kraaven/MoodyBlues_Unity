@@ -9,14 +9,22 @@ This document describes the binary protocol streamed by the Unity client over a 
 connection, plus the HTTP handshake and scene export that precede it (Section 13). It is intended
 to be sufficient, on its own, to write an independent decoder for every byte the client sends.
 
-Implementing files: `Assets/Scripts/Wire/` (`Serializer`, `SerializerDecode`,
-`TransformEventDispatcher`, `RingBufferAccumulator`, `MoodyBluesStreamer`) and
-`Assets/Scripts/Runtime/` (`MoodyBluesSessionManager`, `MoodyBluesMaintenanceSystem`,
-`MoodyBluesRuntimeManager`, `MoodyBluesLog`).
+Implementing files:
+
+- `Assets/Scripts/Wire/`: `Serializer` (event layouts and sizes), `SerializerDecode` (the
+  sender-side decode that keeps baselines in step with the receiver), `TransformEventDispatcher`
+  (event selection), `RingBufferAccumulator` and `EventSendBuffer` (the outgoing buffer, Section
+  8.3 and 8.4), `MoodyBluesStreamer` (the socket).
+- `Assets/Scripts/Runtime/`: `MoodyBluesSessionManager` (and its `.Recording.cs` half),
+  `MoodyBluesMaintenanceSystem`, `MoodyBluesRuntimeManager`, `MoodyBluesLog`, `SceneWalk`,
+  `TransformDiffJob`, `TransformTracking`.
+- `Assets/Scripts/Handshake/` (`MoodyBluesHttpClient`, `HandshakeContracts`, `SceneHasher`,
+  `SceneContentHash`, `SceneIdentity`) and `Assets/Scripts/SceneExport/` (`SceneGltfExporter`,
+  `ObjectIdExportPlugin`) for Section 13.
 
 **If you change the wire format, update this file in the same change.** The constants in
-Section 12 are mechanically derived from the source; if they disagree with the code, the code is
-right and this document is stale.
+Section 12 are copied from the source; if they disagree with the code, the code is right and
+this document is stale.
 
 (This file is plain ASCII on purpose -- an earlier version of one of the source files had its doc
 comments corrupted by a non-UTF-8 save, so special characters are spelled out below: "+/-" instead
@@ -231,7 +239,8 @@ The counters are facts only the client can know:
   encoding and used the 3-byte form.
 - `HardClamps` -- times a value exceeded even the widest encoding. **Non-zero means some recorded
   transforms are wrong**; no promotion can fix it, and the absolute ranges need raising.
-- `DroppedEvents` -- events discarded because the socket could not keep up (Section 8.4).
+- `DroppedEvents` -- events lost because the socket could not keep up: dropped from the buffer
+  or refused when it was full (Section 8.4).
 
 ### 6.2 Lifecycle events
 
@@ -366,7 +375,7 @@ which is the scene export's pose unless the snapshot re-sent it.
 3. **Range overflow (promotion).** If a delta cannot be represented in its range, the whole event
    is promoted to the `True*` variant covering the same properties, rather than clamped. See
    Section 10.2 -- this is a correctness requirement, not an optimisation.
-4. **Recovery from dropped events.** If the client had to discard buffered events (Section 8.4),
+4. **Recovery from dropped events.** If the client had to drop or refuse events (Section 8.4),
    the delta chain is broken for every affected object, so absolute transforms are re-sent for all
    tracked objects once the socket is healthy again.
 5. **Start-of-recording snapshot.** Objects that moved since the scene loaded get one
@@ -544,23 +553,38 @@ and there are now two independent triggers.
 
 ### 8.3 The ring buffer
 
-Events are serialized directly into a circular buffer of `max(256 KB, 4 x PacketSize)` bytes. An
-event is never
-allowed to straddle the end of the buffer: when one would, the leftover tail is stamped with a
-**skip marker** (byte `0`) and the write cursor wraps. The reader steps over that padding.
+Events are serialized directly into a circular buffer of `max(256 KB, 4 x PacketSize)` bytes
+(`RingBufferAccumulator`). An event is never allowed to straddle the end of the buffer: when one
+would, the leftover tail is stamped with a **skip marker** (byte `0`) and the write cursor wraps.
+The reader steps over that padding.
+
+`EventSendBuffer` wraps the ring and records the size of every event in it, which is how a send
+is cut at an event boundary. It also tracks the bytes of the send currently on the socket (the
+**in-flight chunk**), which sit at the front of the ring.
 
 The marker is safe precisely because **no event type is 0** (they start at 1). Padding never
 reaches the wire.
 
 ### 8.4 Backpressure
 
-If the buffer cannot accommodate an event -- socket down, or sends backing up -- the client drops
-the **oldest** buffered events to make room and counts them in `DroppedEvents`. It never throws,
-and never blocks the game.
+A write needs the event's size plus `Serializer.MaxEventSize` bytes of headroom to be free. If it
+is not, the client first tries to drain synchronously (only when connected and no send is
+running), and otherwise makes room as follows. It never throws and never blocks the game.
 
-Dropping has a consequence a decoder should understand: it breaks the `Delta*` chain for every
-affected object. The client therefore re-sends absolute transforms for all tracked objects once
-the socket recovers (Section 6.5, case 4), which re-anchors everything the gap desynchronised.
+- **No send in flight** (socket down, or between sends): the **oldest** buffered events are
+  dropped from the front until the new event fits, and each is counted in `DroppedEvents`.
+- **A send in flight:** nothing is dropped. The in-flight bytes are the oldest data in the ring and
+  the socket may still be reading them, so they can be neither discarded nor overwritten, and a
+  ring can only be trimmed from its front. The **new** event is refused instead and counted in
+  `DroppedEvents`. A refused event is lost whole; buffered events are never cut in half. When the
+  send completes its bytes are released, and writes succeed again.
+- An event larger than the whole ring is refused and counted the same way.
+
+Either way the loss breaks the `Delta*` chain for every affected object (a dropped event may have
+been any object's delta, and a refused one leaves the sender's baseline ahead of what the receiver
+holds). The client therefore re-sends absolute transforms for all tracked objects once the socket
+recovers (Section 6.5, case 4), which re-anchors everything the gap desynchronised. The first loss
+in a session is logged once.
 
 ### 8.5 Recording lifecycle and the start-of-recording snapshot
 
@@ -787,7 +811,8 @@ outside it cannot be recorded correctly and are reported in `HardClamps`.
 | Constant | Value | Source |
 |---|---|---|
 | Protocol version | 3 (the backend refuses any other) | `Serializer.ProtocolVersion` |
-| Ring buffer capacity | max(256 KB, 4 x message size) | `MoodyBluesStreamer` |
+| Ring buffer capacity | max(256 KB, 4 x message size) | `MoodyBluesStreamer.MinRingBufferCapacity`, `RingBufferMessages` (private) |
+| Ring buffer headroom per write | `Serializer.MaxEventSize` | `MoodyBluesStreamer.WriteToAccumulator` |
 | Max packet (message) size | 8, 32 or 128 KB (config Message Size; default 8 KB) | `MoodyBluesClientConfig.MessageSizeBytes` |
 | Max single event size | 32 bytes (`Log`) | `Serializer.MaxEventSize` |
 | BeginSession size | 19 bytes | `Serializer.BeginSessionSize` |
@@ -796,13 +821,14 @@ outside it cannot be recorded correctly and are reported in `HardClamps`.
 | Capture rate | 40 Hz, configurable | `MoodyBluesSessionManager.DefaultCaptureHz` |
 | Keepalive interval | 5 s real time | `MoodyBluesMaintenanceSystem.KeepAliveIntervalSeconds` |
 | Start timeout (handshake + connect) | 60 s | `MoodyBluesSessionManager.StartTimeout` |
-| Handshake / connect retry backoff | 1s / 2s / 4s / 8s, then 8s, until the start timeout | `MoodyBluesHandshakeClient`, `MoodyBluesMaintenanceSystem` |
-| Reconnect backoff (after connecting) | 1s / 2s / 4s / 8s | `MoodyBluesMaintenanceSystem` |
-| Close handshake timeout (synchronous stop) | 2 s | `MoodyBluesMaintenanceSystem.CloseTimeout` |
-| Stop timeout (`StopRecording`) | 10 s | `MoodyBluesMaintenanceSystem.AsyncStopTimeout` |
-| First ObjectID | 1 (0 reserved) | `MoodyBluesSessionManager` |
+| Handshake / scene check retry backoff | 1s / 2s / 4s / 8s, then 8s, until the deadline | `MoodyBluesHttpClient.BackoffMillis` (private) |
+| Connect / reconnect backoff | 1s / 2s / 4s / 8s | `MoodyBluesMaintenanceSystem.ReconnectBackoffMillis` (private) |
+| Close handshake timeout (synchronous stop) | 2 s | `MoodyBluesMaintenanceSystem.CloseTimeout` (private) |
+| Stop timeout (`StopRecording`) | 10 s | `MoodyBluesMaintenanceSystem.AsyncStopTimeout` (private) |
+| Connection test timeout | 15 s | `MoodyBluesHttpClient.TestConnectionAsync` |
+| First ObjectID | 1 (0 reserved) | `MoodyBluesSessionManager._nextObjectId` (private) |
 | Max ObjectID | 65535, then refused | `MoodyBluesSessionManager.RegisterTransform` |
-| Ring buffer skip marker | byte 0 | `RingBufferAccumulator.SkipMarker` |
+| Ring buffer skip marker | byte 0 | `RingBufferAccumulator.SkipMarker` (private) |
 
 Capture rate is sampled in `LateUpdate` on an accumulator, at most once per frame. It runs after
 animation and all `Update` calls, so it observes the transforms the frame actually rendered,
@@ -954,7 +980,8 @@ Export rules:
   true` (inactive objects and the template library are part of the scene), camera-based layer
   culling off and animation export off. EditorOnly objects and the scene-identity holder are not
   exported.
-- `ObjectIdExportPlugin` writes `node.extras` on every exported node:
+- `SceneGltfExporter` writes `node.extras` on every exported node (through `ObjectIdExportPlugin`,
+  the UnityGLTF hook that calls it):
   - `objectId` (ushort) -- **a decoder MUST key off this, never node index or name**;
   - `isHidden` (bool, only when true) -- startup visibility, which the stream deliberately never
     carries because it is static scene state;

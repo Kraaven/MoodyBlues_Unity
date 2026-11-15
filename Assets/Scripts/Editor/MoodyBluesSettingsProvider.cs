@@ -150,7 +150,7 @@ namespace MoodyBlues.EditorTools
             RepaintSettings();
             try
             {
-                (bool ok, string message) = await MoodyBluesHandshakeClient.TestConnectionAsync(connection);
+                (bool ok, string message) = await MoodyBluesHttpClient.TestConnectionAsync(connection);
                 _testMessage = message;
                 _testType = ok ? MessageType.Info : MessageType.Error;
 

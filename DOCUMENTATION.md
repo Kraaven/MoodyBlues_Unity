@@ -14,7 +14,8 @@ The client sends two things, and nothing else:
 
 Companion documents: `Spec.md` (the byte-level wire protocol, which is authoritative),
 `MoodyBlues_Backend/README.md` (what receives it) and
-`MoodyBlues_FrontEnd/DOCUMENTATION.md` (what plays it back).
+`MoodyBlues_FrontEnd/DOCUMENTATION.md` (what plays it back). If this file and the code disagree,
+the code is right.
 
 ---
 
@@ -125,10 +126,16 @@ What happens when the game runs:
    - **Connect.** The upgrade request carries the handshake's stream token in the
      `X-MoodyBlues-Stream-Token` header. `BeginSession` (19 bytes) goes first, carrying the
      protocol version, capture rate and every quantization range.
-   - **Capture.** At 40 Hz in `LateUpdate`, a Burst job diffs every tracked transform against the
-     last value *sent* and emits the smallest event that covers the change.
+   - **Capture.** At 40 Hz in `LateUpdate`, a Burst job (`TransformDiffJob`, the only diff path)
+     compares every tracked transform against the last value *sent* and the smallest event that
+     covers the change is emitted.
    - **Lifecycle.** Lifecycle events and logs are written the moment they happen, each with its
      own timestamp.
+   - **Buffering.** Events are serialized straight into a ring buffer (`EventSendBuffer`) and sent
+     in whole-event messages of up to the configured message size. If the socket cannot keep up,
+     the buffer drops its oldest unsent events; while a send is in flight it refuses new events
+     instead, because the in-flight bytes cannot be touched. Both count in `DroppedEvents`, and
+     the client re-sends absolute transforms for everything afterwards (Spec 8.4).
    - **Keepalive.** A `KeepAlive` goes out every 5 s of real time.
    - **Reconnect.** Backoff of 1, 2, 4 and 8 s, reusing the same URL and token. The backend
      appends to the same session.
@@ -240,24 +247,32 @@ matching upload from the build. Use runtime export for such scenes.
 ## 7. Code layout
 
 ```
-Assets/Scripts/
+Assets/Scripts/                           assembly MoodyBlues (MoodyBlues.asmdef)
   Config/MoodyBluesClientConfig.cs        optional per-scene config: mode, message size, export settings, ranges
   Config/MoodyBluesProjectSettings.cs     project-wide connection string (Resources asset) and its parser
-  Handshake/                              handshake / scene-check client and DTOs, SceneHasher, SceneContentHash,
-                                          SceneIdentity (scene GUID, baked holder)
+  Handshake/
+    MoodyBluesHttpClient.cs               every HTTP call: handshake, scene check, connection test, gzipped scene upload
+    HandshakeContracts.cs                 request and response DTOs
+    SceneHasher.cs, SceneContentHash.cs   the scene hash (structural, content, export) and SHA-256 helpers
+    SceneIdentity.cs                      scene GUID, the baked identity holder in Player builds
   Runtime/
     MoodyBluesSessionManager.cs           scene walk, 40 Hz capture, tracked set, subtree registration
     MoodyBluesSessionManager.Recording.cs recording API, start snapshot, scene check / runtime export / upload
     SceneWalk.cs                          the one ObjectID walk, shared with the editor export
     MoodyBluesLog.cs                      developer log API (LogLevel, LogColor)
-    MoodyBluesSessionExportUtility.cs     node extras: isHidden, invertLook
     MoodyBluesRuntimeManager.cs           Instantiate / Delete / SetActive / SetParent wrappers, template library
     MoodyBluesMaintenanceSystem.cs        connect, KeepAlive, reconnect, EndSession
     TransformDiffJob.cs, TransformTracking.cs   Burst diff job and tracked-state structs
-  Wire/                                   Serializer (33 event types), decode-feedback, event selection,
-                                          ring buffer, WebSocket streamer
-  SceneExport/                            UnityGLTF export, objectId plugin, gzip upload
-  Editor/
+  Wire/
+    Serializer.cs, SerializerDecode.cs    33 event types; the decode that keeps sender baselines equal to the receiver's
+    TransformEventDispatcher.cs           event selection and "did it change" checks
+    RingBufferAccumulator.cs              the ring buffer and its skip marker
+    EventSendBuffer.cs                    the streamer's outgoing buffer: event sizes, the in-flight send, drop / refuse on overflow
+    MoodyBluesStreamer.cs                 the WebSocket, the send pump, log splitting
+  SceneExport/
+    SceneGltfExporter.cs                  UnityGLTF export; writes node extras (objectId, isHidden, invertLook)
+    ObjectIdExportPlugin.cs               the UnityGLTF hook that calls it
+  Editor/                                 assembly MoodyBlues.EditorTools
     SceneIdentityBuildProcessor.cs        bakes the scene GUID and content hash into Player builds
     SceneContentHashEditor.cs             content hash; registered for Play mode
     MoodyBluesSceneExport.cs              editor export, saved exports, upload
@@ -266,23 +281,32 @@ Assets/Scripts/
     MoodyBluesMenu.cs                     the MoodyBlues menu
     MoodyBluesSettingsProvider.cs         Project Settings > MoodyBlues: connection, Test Connection, tool buttons
     MoodyBluesClientConfigEditor.cs       config inspector
-  Testing/                                BallsSpawner, CubeMovement, SampleSceneController samples
-Assets/Tests/EditMode/                    drift, round-trip, event-selection and ring-buffer tests
+Assets/Samples/                           assembly MoodyBlues.Samples (MoodyBlues.Samples.asmdef, references MoodyBlues)
+  BallsSpawner.cs, CubeMovement.cs, SampleSceneController.cs, Prefabs/Ball.prefab
+Assets/Scenes/SampleScene.unity           uses the samples
+Assets/Tests/EditMode/                    drift, serializer round-trip, event-selection, ring-buffer and send-buffer tests
+Assets/Resources/                         MoodyBluesProjectSettings.asset (the connection string), a scene config asset, UnityGLTFSettings.asset
 Spec.md                                   the wire protocol
 ```
 
+**Samples.** `Assets/Samples/` is kept out of the runtime assembly on purpose: nothing in
+`Assets/Scripts/` depends on it. `SampleScene` shows the recorder end to end. Its
+`SampleSceneController` uses Custom Recording Control: it sends the scene, starts recording, runs
+the moving cubes and the ball spawner (which uses `MoodyBluesRuntimeManager.InstantiateObject`),
+and stops after a set time. Connect a project first (Section 3), or the recorder stays inert.
+
 ## 8. Known gaps
 
-- **Skinned meshes.** Bones are tracked and recorded like any other transform, but replaying
-  them as a deforming mesh is not supported yet (planned for the next iteration).
 - **Reconnects.** These work across short network drops, within the 15 s backoff. If the client
   gives up, the rest of that recording is lost; a new `StartRecording` starts a fresh one.
 - **Spawned children reparented out of a clone** whose root is then destroyed are missing from
   the snapshot of a later recording, because the receiver could only create them through the
   root.
 - **Snapshot size.** The snapshot is buffered before the socket opens. The 256 KB buffer holds
-  roughly 13,000 changed objects; beyond that the oldest events are dropped.
-- **EditMode tests.** These have been compiled but have never been run (see ProjectState.md).
+  roughly 13,000 changed objects; beyond that the oldest events are dropped (and counted in
+  `DroppedEvents`).
+- **EditMode tests.** They live in `Assets/Tests/EditMode/` (drift, serializer round trip, event
+  selection, ring buffer, send buffer). Run them from Window > General > Test Runner > EditMode.
 - **Optimized rigs.** Models imported with *Optimize Game Objects* have no bone Transforms, so
   they replay in bind pose. Other skinned meshes are recorded through their bones, which are
   ordinary tracked Transforms (every bone at 40 Hz; only moving bones cost bytes).

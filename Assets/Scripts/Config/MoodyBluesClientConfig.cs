@@ -29,7 +29,7 @@ namespace MoodyBlues
     }
 
     /// <summary>
-    /// Per-scene recorder settings (see Spec.md Section 9). Optional: a MoodyBluesSessionManager
+    /// Per-scene recorder settings (see Spec.md Section 13.1). Optional: a MoodyBluesSessionManager
     /// without one uses these defaults. The backend connection is not here; it is set once for the
     /// whole project in MoodyBlues > Settings (<see cref="MoodyBluesProjectSettings"/>).
     /// </summary>

@@ -7,7 +7,7 @@ namespace MoodyBlues
     /// Owns every prefab the scene can spawn at runtime, and is the only sanctioned way to
     /// show/hide/spawn/destroy tracked objects -- each wrapper here performs the GameObject
     /// operation AND emits the matching wire event, so the receiver's view never drifts from
-    /// what Unity actually did. See Spec.md Sections 4-5.
+    /// what Unity actually did. See Spec.md Sections 5 and 6.2.
     ///
     /// On Awake, every configured prefab is pre-instantiated once as an inactive template under a
     /// "PrefabInstanceLibrary" object, before MoodyBluesSessionManager's own Awake (see
@@ -32,12 +32,10 @@ namespace MoodyBlues
         // shift the template ObjectIDs that previously recorded sessions refer to.
         private readonly Dictionary<string, int> _templateIndexByName = new();
 
-        // Spawned (non-template) instances, so DeleteObject/ObjectSetActive can resolve a GameObject
-        // back to its ObjectID.
-        private readonly Dictionary<GameObject, ushort> _liveInstanceIds = new();
-
         // Spawned ObjectID -> the template ObjectID it was cloned from. The start-of-recording
-        // snapshot needs it to re-describe spawns that happened while nothing was recording.
+        // snapshot needs it to re-describe spawns that happened while nothing was recording. Kept
+        // rather than derived from _spawnSubtrees, which has no entry for spawns that registered
+        // only their root.
         private readonly Dictionary<ushort, ushort> _templateIdBySpawnId = new();
 
         /// <summary>One node of a template's subtree, in walk order, as a clone's matching child starts.</summary>
@@ -76,7 +74,6 @@ namespace MoodyBlues
         // Reused by DeleteObject's subtree walk so a delete allocates nothing.
         private readonly List<ushort> _deleteFrontierScratch = new();
         private readonly List<ushort> _deleteSubtreeIdsScratch = new();
-        private readonly List<Transform> _deleteSubtreeTransformsScratch = new();
 
         /// <summary>
         /// Null-safe accessor. The session manager can be destroyed before this component on
@@ -235,7 +232,7 @@ namespace MoodyBlues
             if (parent != null) instance.transform.SetParent(parent);
 
             // "PrefabName_clone-XXXXXX": the suffix is cosmetic only (ObjectID, not name, drives all
-            // tracking/lookup via _liveInstanceIds/_idByTransform), so collisions are harmless.
+            // tracking/lookup via the session manager's _idByTransform), so collisions are harmless.
             // The name comes from the library template, not prefabs[prefabIndex]: a list entry can
             // be a scene object rather than a prefab asset, and may since have been destroyed.
             instance.name = $"{_templateInstances[prefabIndex].name}_clone-{Random.Range(0, 1000000):D6}";
@@ -269,7 +266,6 @@ namespace MoodyBlues
                 return instance;
             }
 
-            _liveInstanceIds[instance] = newObjectId;
             _templateIdBySpawnId[newObjectId] = templateObjectId;
             if (cloneNodes.Count > 1)
             {
@@ -380,14 +376,12 @@ namespace MoodyBlues
 
             _deleteFrontierScratch.Clear();
             _deleteSubtreeIdsScratch.Clear();
-            _deleteSubtreeTransformsScratch.Clear();
 
             CollectTrackedSubtree(
                 go.transform,
                 hasTrackedAncestor: false,
                 _deleteFrontierScratch,
-                _deleteSubtreeIdsScratch,
-                _deleteSubtreeTransformsScratch);
+                _deleteSubtreeIdsScratch);
 
             if (_deleteSubtreeIdsScratch.Count == 0)
             {
@@ -406,8 +400,6 @@ namespace MoodyBlues
 
             for (int i = 0; i < _deleteSubtreeIdsScratch.Count; i++)
             {
-                Transform t = _deleteSubtreeTransformsScratch[i];
-                if (t != null) _liveInstanceIds.Remove(t.gameObject);
                 _templateIdBySpawnId.Remove(_deleteSubtreeIdsScratch[i]);
                 _spawnSubtrees.Remove(_deleteSubtreeIdsScratch[i]);
                 _spawnPartIds.Remove(_deleteSubtreeIdsScratch[i]);
@@ -430,14 +422,12 @@ namespace MoodyBlues
             Transform t,
             bool hasTrackedAncestor,
             List<ushort> frontier,
-            List<ushort> allIds,
-            List<Transform> allTransforms)
+            List<ushort> allIds)
         {
             bool tracked = Session.TryGetIdForTransform(t, out ushort id);
             if (tracked)
             {
                 allIds.Add(id);
-                allTransforms.Add(t);
 
                 if (!hasTrackedAncestor)
                 {
@@ -447,7 +437,7 @@ namespace MoodyBlues
 
             for (int i = 0; i < t.childCount; i++)
             {
-                CollectTrackedSubtree(t.GetChild(i), hasTrackedAncestor || tracked, frontier, allIds, allTransforms);
+                CollectTrackedSubtree(t.GetChild(i), hasTrackedAncestor || tracked, frontier, allIds);
             }
         }
 
@@ -534,7 +524,6 @@ namespace MoodyBlues
 
         public bool TryGetObjectId(GameObject go, out ushort id)
         {
-            if (go != null && _liveInstanceIds.TryGetValue(go, out id)) return true;
             if (go != null && Session != null && Session.TryGetIdForTransform(go.transform, out id)) return true;
             id = 0;
             return false;

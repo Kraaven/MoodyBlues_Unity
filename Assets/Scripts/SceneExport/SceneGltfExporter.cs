@@ -31,7 +31,7 @@ namespace MoodyBlues
     }
 
     /// <summary>
-    /// Exports a scene to an in-memory, self-contained .glb (see Spec.md Section 9). Used by the
+    /// Exports a scene to an in-memory, self-contained .glb (see Spec.md Section 13.3). Used by the
     /// running game (runtime export) and by the editor tooling (build-time and Tools menu export).
     ///
     /// Exactly the transforms in the ObjectID map are exported, each carrying its ObjectID in
@@ -44,7 +44,7 @@ namespace MoodyBlues
     ///   than the object's own mesh. Only happens at runtime: batching runs after the scene loads.
     ///
     /// Note on mesh compression: UnityGLTF's KHR_draco_mesh_compression support is import-only, so
-    /// SceneUploadClient gzips the upload instead.
+    /// MoodyBluesHttpClient gzips the upload instead.
     /// </summary>
     public static class SceneGltfExporter
     {
@@ -181,11 +181,21 @@ namespace MoodyBlues
             {
                 if (!_ids.TryGetValue(t, out ushort objectId)) return;
 
+                // UnityGLTF turns the rotation of every Camera or Light node by 180 degrees about Y,
+                // enabled or not and whether or not the light is itself exported, so a receiver
+                // cannot infer it from the GLB. The backend needs the flag to convert streamed
+                // rotations (raw Unity local rotations) into the exported node's space.
+                bool invertLook = HasInvertedLook(t);
+
+                // A runtime export describes the scene as it was at Start, which may differ from its
+                // state at the moment of export, hence the override. activeSelf rather than
+                // activeInHierarchy on purpose: glTF consumers propagate a hidden node to its
+                // descendants, so flagging only the inactive object reproduces activeInHierarchy for
+                // the whole subtree.
                 bool activeSelf = t.gameObject.activeSelf;
                 if (_overrides != null && _overrides.TryGetValue(objectId, out ExportNodeState state))
                 {
                     // Same conversion UnityGLTF applies in Node.SetUnityTransform.
-                    bool invertLook = t.GetComponent<Camera>() != null || t.GetComponent<Light>() != null;
                     node.Translation = state.LocalPosition.ToGltfVector3Convert();
                     node.Rotation = (state.LocalRotation * (invertLook ? InvertLookDirection : Quaternion.identity)).ToGltfQuaternionConvert();
                     node.Scale = state.LocalScale.ToGltfVector3Raw();
@@ -195,9 +205,13 @@ namespace MoodyBlues
                 CheckMesh(t, node);
 
                 var extras = new JObject { ["objectId"] = objectId };
-                MoodyBluesSessionManager.PopulateObjectUserData(t, extras, activeSelf);
+                if (!activeSelf) extras["isHidden"] = true;
+                if (invertLook) extras["invertLook"] = true;
                 node.Extras = extras;
             }
+
+            private static bool HasInvertedLook(Transform t) =>
+                t.GetComponent<Camera>() != null || t.GetComponent<Light>() != null;
 
             private void CheckMesh(Transform t, Node node)
             {

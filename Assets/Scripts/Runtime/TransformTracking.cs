@@ -26,6 +26,20 @@ namespace MoodyBlues
             LastSentRotation = t.localRotation,
             LastSentScale = t.localScale,
         };
+
+        /// <summary>
+        /// What the RECEIVER will reconstruct from an encoded event, not the true float. Delta*
+        /// events are integrated by the receiver, so feeding the true value back would leave the two
+        /// sides' baselines permanently diverging and let the rounding error compound every tick.
+        /// With the encoded value as the baseline, error stays pinned at a single quantization step
+        /// no matter how long the session runs.
+        /// </summary>
+        public static TrackedState From(in TransformEncodeResult encoded) => new TrackedState
+        {
+            LastSentPosition = encoded.Position,
+            LastSentRotation = encoded.Rotation,
+            LastSentScale = encoded.Scale,
+        };
     }
 
     /// <summary>

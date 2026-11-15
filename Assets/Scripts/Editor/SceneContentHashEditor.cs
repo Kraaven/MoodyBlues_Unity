@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Security.Cryptography;
 using System.Text;
 using UnityEditor;
 
@@ -43,12 +42,7 @@ namespace MoodyBlues.EditorTools
                     .Append(AssetDatabase.GetAssetDependencyHash(path).ToString()).Append('\n');
             }
 
-            using var sha256 = SHA256.Create();
-            byte[] digest = sha256.ComputeHash(Encoding.UTF8.GetBytes(text.ToString()));
-
-            var hex = new StringBuilder(digest.Length * 2);
-            foreach (byte b in digest) hex.Append(b.ToString("x2"));
-            return hex.ToString();
+            return SceneHasher.HashText(text.ToString());
         }
     }
 }

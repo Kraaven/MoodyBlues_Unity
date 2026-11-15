@@ -6,7 +6,7 @@ using UnityGLTF.Plugins;
 namespace MoodyBlues
 {
     /// <summary>
-    /// UnityGLTF export plugin behind <see cref="SceneGltfExporter"/> (see Spec.md Section 9). During
+    /// UnityGLTF export plugin behind <see cref="SceneGltfExporter"/> (see Spec.md Section 13.3). During
     /// a MoodyBlues export it:
     /// - leaves out every transform without an ObjectID (ShouldNodeExport);
     /// - writes each node's ObjectID and MoodyBlues metadata into node.extras, so the backend can

@@ -7,7 +7,7 @@ using UnityEngine;
 namespace MoodyBlues.EditorTools
 {
     /// <summary>
-    /// Before a Player build, for every recorded scene in the build (Spec.md Section 9):
+    /// Before a Player build, for every recorded scene in the build (Spec.md Section 13.3):
     /// - scenes that export at runtime get Read/Write enabled on their models;
     /// - scenes with Export Scene on Build are exported in the Editor and uploaded if the backend
     ///   lacks that version (the upload finishes after the build returns);

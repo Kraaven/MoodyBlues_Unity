@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.IO.Compression;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -7,18 +9,21 @@ using UnityEngine.Networking;
 namespace MoodyBlues
 {
     /// <summary>
-    /// HTTP calls to the backend (see Spec.md Sections 9 and 13): the session handshake, the
-    /// scene check, and the scene upload. Pure transport: MoodyBluesSessionManager decides when
+    /// HTTP calls to the backend (see Spec.md Section 13): the session handshake, the
+    /// scene check, the connection test and the scene upload. Pure transport: MoodyBluesSessionManager decides when
     /// to call these and what to do with the result. All methods must be called from the main
     /// thread (UnityWebRequest requires it) and never throw.
     /// </summary>
-    public static class MoodyBluesHandshakeClient
+    public static class MoodyBluesHttpClient
     {
-        /// <summary>Header carrying the project's ingest key on every backend call (Spec.md Section 9).</summary>
+        /// <summary>Header carrying the project's ingest key on every backend call (Spec.md Section 13.1).</summary>
         public const string IngestKeyHeader = "X-MoodyBlues-Ingest-Key";
 
         /// <summary>Header carrying the session's stream token on the WebSocket upgrade.</summary>
         public const string StreamTokenHeader = "X-MoodyBlues-Stream-Token";
+
+        /// <summary>Tells the backend how many meshes the export had to leave out.</summary>
+        public const string SkippedMeshesHeader = "X-MoodyBlues-Skipped-Meshes";
 
         private static readonly int[] BackoffMillis = { 1000, 2000, 4000, 8000 };
 
@@ -93,18 +98,39 @@ namespace MoodyBlues
             }
         }
 
-        /// <summary>Uploads an exported scene. Returns false on failure, after logging why.</summary>
+        /// <summary>
+        /// POSTs an exported scene's .glb to the backend's sceneUploadUrl (Spec.md Section 13.3), gzipped
+        /// because UnityGLTF has no export-side Draco support (see SceneGltfExporter). Returns false
+        /// on failure, after logging why.
+        /// </summary>
         public static async Task<bool> UploadSceneAsync(string sceneUploadUrl, string ingestKey, byte[] glb, int skippedMeshes = 0)
         {
             try
             {
-                await SceneUploadClient.UploadAsync(sceneUploadUrl, ingestKey, glb, skippedMeshes);
-                Debug.Log($"MoodyBluesHandshakeClient: scene upload complete ({glb.Length} bytes).");
+                using UnityWebRequest req = new UnityWebRequest(sceneUploadUrl, UnityWebRequest.kHttpVerbPOST)
+                {
+                    uploadHandler = new UploadHandlerRaw(Gzip(glb)),
+                    downloadHandler = new DownloadHandlerBuffer()
+                };
+                req.SetRequestHeader("Content-Type", "model/gltf-binary");
+                req.SetRequestHeader("Content-Encoding", "gzip");
+                SetIngestKey(req, ingestKey);
+                if (skippedMeshes > 0) req.SetRequestHeader(SkippedMeshesHeader, skippedMeshes.ToString());
+
+                await SendAsync(req);
+
+                if (req.result != UnityWebRequest.Result.Success)
+                {
+                    Debug.LogError($"MoodyBluesHttpClient: scene upload to '{sceneUploadUrl}' failed ({req.responseCode}) - {req.error} {req.downloadHandler?.text}");
+                    return false;
+                }
+
+                Debug.Log($"MoodyBluesHttpClient: scene upload complete ({glb.Length} bytes).");
                 return true;
             }
             catch (Exception ex)
             {
-                Debug.LogError($"MoodyBluesHandshakeClient: scene upload failed - {ex.Message}");
+                Debug.LogError($"MoodyBluesHttpClient: scene upload failed - {ex.Message}");
                 return false;
             }
         }
@@ -121,7 +147,7 @@ namespace MoodyBlues
             {
                 if (string.IsNullOrEmpty(ingestKey))
                 {
-                    Debug.LogError($"MoodyBluesHandshakeClient: {what} skipped. {MoodyBluesProjectSettings.NotSetMessage}");
+                    Debug.LogError($"MoodyBluesHttpClient: {what} skipped. {MoodyBluesProjectSettings.NotSetMessage}");
                     return null;
                 }
 
@@ -132,7 +158,7 @@ namespace MoodyBlues
                     int remainingSeconds = (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalSeconds);
                     if (remainingSeconds <= 0)
                     {
-                        Debug.LogError($"MoodyBluesHandshakeClient: {what} did not succeed before the timeout, giving up.");
+                        Debug.LogError($"MoodyBluesHttpClient: {what} did not succeed before the timeout, giving up.");
                         return null;
                     }
 
@@ -156,7 +182,7 @@ namespace MoodyBlues
                         catch (Exception ex)
                         {
                             // Backend contract mismatch, not a transient failure -- retrying won't help.
-                            Debug.LogError($"MoodyBluesHandshakeClient: failed to parse {what} response - {ex.Message}\nBody: {req.downloadHandler.text}");
+                            Debug.LogError($"MoodyBluesHttpClient: failed to parse {what} response - {ex.Message}\nBody: {req.downloadHandler.text}");
                             return null;
                         }
                     }
@@ -169,16 +195,16 @@ namespace MoodyBlues
                         string hint = status == 401
                             ? " Paste the current connection string from the project page of the dashboard into MoodyBlues > Settings (it changes when the key is rotated)."
                             : "";
-                        Debug.LogError($"MoodyBluesHandshakeClient: {what} rejected by the backend ({status}) - {req.downloadHandler.text}{hint}");
+                        Debug.LogError($"MoodyBluesHttpClient: {what} rejected by the backend ({status}) - {req.downloadHandler.text}{hint}");
                         return null;
                     }
 
                     int delay = BackoffMillis[Math.Min(attempt, BackoffMillis.Length - 1)];
-                    Debug.LogWarning($"MoodyBluesHandshakeClient: {what} attempt {attempt + 1} failed - {req.error}. Retrying in {delay}ms.");
+                    Debug.LogWarning($"MoodyBluesHttpClient: {what} attempt {attempt + 1} failed - {req.error}. Retrying in {delay}ms.");
 
                     if (DateTime.UtcNow + TimeSpan.FromMilliseconds(delay) >= deadlineUtc)
                     {
-                        Debug.LogError($"MoodyBluesHandshakeClient: {what} did not succeed before the timeout, giving up.");
+                        Debug.LogError($"MoodyBluesHttpClient: {what} did not succeed before the timeout, giving up.");
                         return null;
                     }
 
@@ -187,9 +213,19 @@ namespace MoodyBlues
             }
             catch (Exception ex)
             {
-                Debug.LogError($"MoodyBluesHandshakeClient: {what} failed unexpectedly - {ex}");
+                Debug.LogError($"MoodyBluesHttpClient: {what} failed unexpectedly - {ex}");
                 return null;
             }
+        }
+
+        private static byte[] Gzip(byte[] data)
+        {
+            using var output = new MemoryStream();
+            using (var gzip = new GZipStream(output, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+            {
+                gzip.Write(data, 0, data.Length);
+            }
+            return output.ToArray();
         }
 
         private static Task SendAsync(UnityWebRequest request)
