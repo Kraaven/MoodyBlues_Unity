@@ -337,8 +337,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1 &295452678
 GameObject:
   m_ObjectHideFlags: 0
@@ -444,8 +447,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: '::'
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1 &300868511
 GameObject:
   m_ObjectHideFlags: 0
@@ -552,8 +558,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1 &330585543
 GameObject:
   m_ObjectHideFlags: 0
@@ -1037,8 +1046,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1 &1097130149
 GameObject:
   m_ObjectHideFlags: 0
@@ -1144,8 +1156,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1 &1107350536
 GameObject:
   m_ObjectHideFlags: 0
@@ -1251,8 +1266,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1 &1271060147
 GameObject:
   m_ObjectHideFlags: 0
@@ -1498,8 +1516,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1 &1442346665
 GameObject:
   m_ObjectHideFlags: 0
@@ -1533,7 +1554,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: '::'
   config: {fileID: 11400000, guid: c516a56bcce143c08e42f0257c1e3cb2, type: 2}
   captureHz: 40
-  useJobDiff: 1
 --- !u!4 &1442346667
 Transform:
   m_ObjectHideFlags: 0
@@ -1622,7 +1642,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: '::'
   prefabName: Ball
-  maxBallCount: 5
+  maxBallCount: 20
   spawnInterval: 1.5
   killHeight: -300
 --- !u!1 &1684483157
@@ -1768,8 +1788,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.Samples.CubeMovement
   radius: 10
   minSpeed: 0.25
-  maxSpeed: 2
+  maxSpeed: 4
   speed: 0
+  CubeHolder: {fileID: 0}
+  minReparentInterval: 2
+  maxReparentInterval: 12
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

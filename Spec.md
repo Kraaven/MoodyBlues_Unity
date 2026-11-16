@@ -988,7 +988,12 @@ Export rules:
   - `invertLook` (bool, only when true) -- the GameObject has a Camera or Light component, so
     UnityGLTF multiplied the exported node rotation by a 180 deg turn about Y (its
     `InvertDirection`). A receiver converting streamed rotations into the GLB's space must apply
-    the same turn for these nodes (see 13.4).
+    the same turn for these nodes (see 13.4);
+  - `camera` (object, only on nodes whose GameObject has a Camera component) -- `index` (int) is
+    the camera's 0-based, dense position across all exported cameras: cameras tagged `MainCamera`
+    first, then by `Camera.depth` ascending, then by ObjectID ascending (several `MainCamera`s are
+    ordered among themselves the same way); `tag` (string) is the GameObject's tag (`MainCamera`,
+    `Untagged`, ...).
 - UnityGLTF inserts an extra node (`<name>-flipped`) between a Camera or Light node and its
   children. It has no extras.
 - Meshes that cannot be exported are left off their node and counted: in a Player, meshes without

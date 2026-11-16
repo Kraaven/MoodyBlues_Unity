@@ -37,6 +37,7 @@ namespace MoodyBlues
     /// Exactly the transforms in the ObjectID map are exported, each carrying its ObjectID in
     /// node.extras (see <see cref="ObjectIdExportPlugin"/>). Anything else in the scene -- objects
     /// spawned after the walk, EditorOnly objects, the scene-identity holder -- is left out.
+    /// Nodes with a Camera also carry extras.camera = { index, tag } (see ExportJob.BuildCameraIndices).
     ///
     /// Meshes that cannot be exported are left off their node and counted:
     /// - in a Player, meshes without Read/Write (UnityGLTF skips them itself);
@@ -165,6 +166,7 @@ namespace MoodyBlues
         {
             private readonly IReadOnlyDictionary<Transform, ushort> _ids;
             private readonly IReadOnlyDictionary<ushort, ExportNodeState> _overrides;
+            private readonly Dictionary<Transform, int> _cameraIndices;
             private readonly List<string> _skippedNames = new();
 
             public int SkippedMeshes { get; private set; }
@@ -173,10 +175,41 @@ namespace MoodyBlues
             {
                 _ids = ids;
                 _overrides = overrides;
+                _cameraIndices = BuildCameraIndices(ids);
+            }
+
+            /// <summary>
+            /// Numbers every exported camera, 0-based and dense: MainCamera-tagged cameras first, then
+            /// by <see cref="Camera.depth"/> ascending, then by ObjectID ascending. Done up front
+            /// because AfterNodeExport sees one node at a time.
+            /// </summary>
+            private static Dictionary<Transform, int> BuildCameraIndices(IReadOnlyDictionary<Transform, ushort> ids)
+            {
+                var cameras = new List<(Transform Transform, bool IsMain, float Depth, ushort Id)>();
+                foreach (KeyValuePair<Transform, ushort> pair in ids)
+                {
+                    if (pair.Key == null || !pair.Key.TryGetComponent(out Camera camera)) continue;
+                    cameras.Add((pair.Key, pair.Key.CompareTag("MainCamera"), camera.depth, pair.Value));
+                }
+
+                cameras.Sort((a, b) =>
+                {
+                    if (a.IsMain != b.IsMain) return a.IsMain ? -1 : 1;
+                    int byDepth = a.Depth.CompareTo(b.Depth);
+                    return byDepth != 0 ? byDepth : a.Id.CompareTo(b.Id);
+                });
+
+                var indices = new Dictionary<Transform, int>(cameras.Count);
+                for (int i = 0; i < cameras.Count; i++) indices[cameras[i].Transform] = i;
+                return indices;
             }
 
             public bool ShouldExport(Transform t) => t != null && _ids.ContainsKey(t);
 
+            /// <summary>
+            /// Writes node.extras: objectId, plus isHidden and invertLook when set, plus camera
+            /// { index, tag } when the transform has a Camera.
+            /// </summary>
             public void AfterNodeExport(Transform t, Node node)
             {
                 if (!_ids.TryGetValue(t, out ushort objectId)) return;
@@ -207,6 +240,10 @@ namespace MoodyBlues
                 var extras = new JObject { ["objectId"] = objectId };
                 if (!activeSelf) extras["isHidden"] = true;
                 if (invertLook) extras["invertLook"] = true;
+                if (_cameraIndices.TryGetValue(t, out int cameraIndex))
+                {
+                    extras["camera"] = new JObject { ["index"] = cameraIndex, ["tag"] = t.gameObject.tag };
+                }
                 node.Extras = extras;
             }
 

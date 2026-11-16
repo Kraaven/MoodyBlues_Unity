@@ -1,0 +1,28 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9e756fb9f0a1450789eef05bf350e285, type: 3}
+  m_Name: MoodyBluesClientConfig  Playground
+  m_EditorClassIdentifier: 
+  recordingEnabled: 1
+  recordingMode: 1
+  messageSize: 32
+  exportSceneOnBuild: 1
+  exportSceneOnRuntimeStart: 1
+  alwaysExportAtRuntime: 0
+  exportSceneFromEditor: 1
+  positionRange: 500
+  scaleMin: -1
+  scaleMax: 10
+  deltaPositionRange: 1.5
+  deltaRotationComponentRange: 0.5
+  deltaSingleAxisAngleRange: 2
+  deltaScaleRange: 1

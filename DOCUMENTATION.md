@@ -270,7 +270,7 @@ Assets/Scripts/                           assembly MoodyBlues (MoodyBlues.asmdef
     EventSendBuffer.cs                    the streamer's outgoing buffer: event sizes, the in-flight send, drop / refuse on overflow
     MoodyBluesStreamer.cs                 the WebSocket, the send pump, log splitting
   SceneExport/
-    SceneGltfExporter.cs                  UnityGLTF export; writes node extras (objectId, isHidden, invertLook)
+    SceneGltfExporter.cs                  UnityGLTF export; writes node extras (objectId, isHidden, invertLook, camera)
     ObjectIdExportPlugin.cs               the UnityGLTF hook that calls it
   Editor/                                 assembly MoodyBlues.EditorTools
     SceneIdentityBuildProcessor.cs        bakes the scene GUID and content hash into Player builds
@@ -284,6 +284,10 @@ Assets/Scripts/                           assembly MoodyBlues (MoodyBlues.asmdef
 Assets/Samples/                           assembly MoodyBlues.Samples (MoodyBlues.Samples.asmdef, references MoodyBlues)
   BallsSpawner.cs, CubeMovement.cs, SampleSceneController.cs, Prefabs/Ball.prefab
 Assets/Scenes/SampleScene.unity           uses the samples
+Assets/Playground/                        assembly MoodyBlues.Playground: a first-person park-and-house test scene
+  Scripts/                                player, interaction, HUD and PlaygroundSession (recording control)
+  Art/, CREDITS.md                        Kenney CC0 packs, each with its License.txt
+Assets/Scenes/PlaygroundScene.unity       the playground scene
 Assets/Tests/EditMode/                    drift, serializer round-trip, event-selection, ring-buffer and send-buffer tests
 Assets/Resources/                         MoodyBluesProjectSettings.asset (the connection string), a scene config asset, UnityGLTFSettings.asset
 Spec.md                                   the wire protocol
@@ -294,6 +298,15 @@ Spec.md                                   the wire protocol
 `SampleSceneController` uses Custom Recording Control: it sends the scene, starts recording, runs
 the moving cubes and the ball spawner (which uses `MoodyBluesRuntimeManager.InstantiateObject`),
 and stops after a set time. Connect a project first (Section 3), or the recorder stays inert.
+
+**Playground.** `Assets/Scenes/PlaygroundScene.unity` is a walkable 3D test scene (a low-poly park
+and a small house with a locked door, a key, a light switch, 12 pickups and a chest), made from
+Kenney CC0 packs. Controls: WASD move, mouse look, Space jump, Shift sprint, E interact, Q or G
+drop, left click throw, Esc free the cursor. It uses its own config
+(`Assets/Resources/MoodyBluesClientConfig  Playground.asset`) with Custom Recording Control.
+`PlaygroundSession` starts recording once the scene has loaded and stops it when `\` is pressed (or
+the scene is torn down), and forwards pickups, drops, throws, doors, switches and deposits to
+`MoodyBluesLog`.
 
 ## 8. Known gaps
 
