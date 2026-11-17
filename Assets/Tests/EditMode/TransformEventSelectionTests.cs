@@ -26,7 +26,7 @@ namespace MoodyBlues.Tests
                 scaleMin: -1f,
                 scaleMax: 10f,
                 deltaPositionRange: DeltaPositionRange,
-                deltaRotationComponentRange: 0.5f,
+                deltaRotationComponentRange: 0.25f,
                 deltaSingleAxisAngleRange: DeltaSingleAxisAngleRange,
                 deltaScaleRange: 1f);
         }
@@ -142,10 +142,10 @@ namespace MoodyBlues.Tests
         [Test]
         public void HugeRotation_BeyondDropW_PromotesToAbsolute()
         {
-            // Drop-W stores x/y/z over +/-0.5, and for a rotation of theta about a unit axis each
-            // component is sin(theta/2) * axisComponent. About (1,1,1)/sqrt(3) that reaches exactly
-            // 0.5 at 120 degrees -- which still fits, since the range is inclusive. 150 degrees
-            // gives 0.5577 and genuinely overflows, so absolute is the only correct encoding.
+            // Drop-W stores x/y/z over +/-0.25, and for a rotation of theta about a unit axis each
+            // component is sin(theta/2) * axisComponent. About (1,1,1)/sqrt(3) that reaches 0.25 at
+            // about 51 degrees, so 150 degrees (0.5577) genuinely overflows and absolute is the
+            // only correct encoding.
             TransformEncodeResult result = Encode(d =>
             {
                 d.RotationChanged = true;
@@ -158,20 +158,73 @@ namespace MoodyBlues.Tests
         }
 
         [Test]
-        public void RotationExactlyAtTheDropWBoundary_StillUsesTheDelta()
+        public void OffAxisRotation_InsideDropWRange_UsesDropW()
         {
-            // Pins the inclusive edge. 120 degrees about (1,1,1) produces components of exactly
-            // 0.5, so it must encode as a delta rather than being treated as overflow -- otherwise
-            // the promotion threshold is off by one representable value.
+            // 40 degrees about (1,1,1): components 0.197 fit, and it is nowhere near a single axis.
             TransformEncodeResult result = Encode(d =>
             {
                 d.RotationChanged = true;
-                d.currentRotation = d.previousRotation * Quaternion.AngleAxis(120f, new Vector3(1f, 1f, 1f).normalized);
+                d.currentRotation = d.previousRotation * Quaternion.AngleAxis(40f, new Vector3(1f, 1f, 1f).normalized);
                 return d;
             }, out byte eventType);
 
             Assert.AreEqual((byte)Serializer.EventType.DeltaRotation, eventType);
             Assert.AreEqual(0, result.PromotedMask);
+            Assert.IsFalse(result.RotationWidened, "off-axis: single-axis would not have been more accurate");
+        }
+
+        [Test]
+        public void PureSingleAxisRotation_ChoosesSingleAxis_EvenWhenSmall()
+        {
+            // The old 0.25-degree alignment test and the wobbling baseline made this almost never
+            // happen. Each of these is a pure rotation about one axis, in either direction.
+            foreach (Vector3 axis in new[] { Vector3.right, Vector3.up, Vector3.forward, Vector3.down })
+            {
+                foreach (float angle in new[] { 0.3f, 0.7f, 1.9f, -1.3f })
+                {
+                    Encode(d =>
+                    {
+                        d.RotationChanged = true;
+                        d.currentRotation = d.previousRotation * Quaternion.AngleAxis(angle, axis);
+                        return d;
+                    }, out byte eventType);
+
+                    Assert.AreEqual((byte)Serializer.EventType.DeltaRotationSingleAxis, eventType,
+                        $"{angle} deg about {axis}");
+                }
+            }
+        }
+
+        [Test]
+        public void TiltedSmallRotation_PicksDropW_PureYawPicksSingleAxis()
+        {
+            // Yaw 1 deg plus pitch 0.15 deg: the off-axis part is below the old 0.16 deg
+            // Quaternion.Angle blind spot, but drop-W represents it better than one axis.
+            Encode(d =>
+            {
+                d.RotationChanged = true;
+                d.currentRotation = d.previousRotation * Quaternion.AngleAxis(1f, Vector3.up) * Quaternion.AngleAxis(0.15f, Vector3.right);
+                return d;
+            }, out byte tilted);
+            Assert.AreEqual((byte)Serializer.EventType.DeltaRotation, tilted);
+
+            Encode(d =>
+            {
+                d.RotationChanged = true;
+                d.currentRotation = d.previousRotation * Quaternion.AngleAxis(1f, Vector3.up);
+                return d;
+            }, out byte pure);
+            Assert.AreEqual((byte)Serializer.EventType.DeltaRotationSingleAxis, pure);
+        }
+
+        [Test]
+        public void PureYawBelowTheDropWHalfStep_IsNotAChange_SoNothingIsEmitted()
+        {
+            // 0.05 deg is a non-zero single-axis code but below the drop-W half step (about 0.11
+            // deg), and the gate is drop-W only.
+            Quaternion current = Quaternion.AngleAxis(0.05f, Vector3.up);
+            Assert.IsFalse(Serializer.ChangeGate.RotationChanged(current, Quaternion.identity));
+            Assert.IsFalse(TransformEventDispatcher.HasRotationChanged(current, Quaternion.identity));
         }
 
         // ---- Position / scale promotion -------------------------------------------------------

@@ -151,7 +151,7 @@ namespace MoodyBlues
         private static float ScaleMin = -1.0f;
         private static float ScaleMax = 10.0f;
         private static float DeltaPositionRange = 1.5f;
-        private static float DeltaRotationComponentRange = 0.5f;
+        private static float DeltaRotationComponentRange = 0.25f;
         private static float DeltaSingleAxisAngleRange = 2.0f;
         private static float DeltaScaleRange = 1.0f;
 
@@ -194,11 +194,15 @@ namespace MoodyBlues
             (PositionRange, ScaleMin, ScaleMax, DeltaPositionRange,
              DeltaRotationComponentRange, DeltaSingleAxisAngleRange, DeltaScaleRange);
 
+        /// <summary>The change gate for the current ranges (see <see cref="DeltaChangeGate"/>).</summary>
+        public static DeltaChangeGate ChangeGate =>
+            new DeltaChangeGate(DeltaPositionRange, DeltaRotationComponentRange, DeltaScaleRange);
+
         #endregion
 
         #region Range checks (overflow detection)
 
-        // QuantizeToBits clamps, which is correct behaviour for keeping precision concentrated on
+        // The quantizers clamp, which is correct behaviour for keeping precision concentrated on
         // the common range -- but a clamped *delta* is integrated by the receiver and never
         // recovered, so the error is permanent rather than a one-frame artefact. These predicates
         // let the dispatcher detect that case up front and promote to a wider encoding instead.
@@ -218,7 +222,7 @@ namespace MoodyBlues
         /// <summary>
         /// Drop-W only stores x/y/z, so a rotation is representable when those three fit. Angle
         /// theta about a unit axis gives components of magnitude sin(theta/2), so the default
-        /// +/-0.5 covers up to 60 degrees of rotation in a single tick.
+        /// +/-0.25 covers up to about 29 degrees of rotation in a single tick.
         /// </summary>
         public static bool FitsDeltaRotation(Quaternion delta)
         {
@@ -255,7 +259,11 @@ namespace MoodyBlues
 
         #region Quantization Helpers
 
-        private static uint QuantizeToBits(float value, float min, float max, int bits)
+        // Signed (+/-R) fields use the symmetric quantizer in Quantization.cs so zero is exact.
+        // Only the remaining unsigned fields (absolute scale, absolute single-axis angle) use the
+        // linear [min, max] -> [0, 2^n - 1] remap below.
+
+        private static uint QuantizeUnsigned(float value, float min, float max, int bits)
         {
             uint maxValue = (1u << bits) - 1u;
             float remapped = RemapRange(value, min, max, 0f, maxValue);
@@ -263,7 +271,7 @@ namespace MoodyBlues
             return (uint)Mathf.RoundToInt(remapped);
         }
 
-        private static float DequantizeFromBits(uint value, float min, float max, int bits)
+        private static float DequantizeUnsigned(uint value, float min, float max, int bits)
         {
             uint maxValue = (1u << bits) - 1u;
             return RemapRange(value, 0f, maxValue, min, max);
@@ -275,24 +283,24 @@ namespace MoodyBlues
 
         private static void SerializeFloatToUInt16Buffer(float value, float min, float max, Span<byte> destination)
         {
-            ushort quantized = (ushort)QuantizeToBits(value, min, max, 16);
+            ushort quantized = (ushort)QuantizeUnsigned(value, min, max, 16);
             MemoryMarshal.Cast<byte, ushort>(destination)[0] = quantized;
         }
 
         private static float DeserializeFloatFromUInt16Buffer(float min, float max, ReadOnlySpan<byte> source)
         {
             ushort quantized = MemoryMarshal.Cast<byte, ushort>(source)[0];
-            return DequantizeFromBits(quantized, min, max, 16);
+            return DequantizeUnsigned(quantized, min, max, 16);
         }
 
-        private static void SerializeFloatToByteBuffer(float value, float min, float max, Span<byte> destination)
+        private static void SerializeFloatToByteBuffer(float value, float range, Span<byte> destination)
         {
-            destination[0] = (byte)QuantizeToBits(value, min, max, 8);
+            destination[0] = (byte)Quantization.QuantizeSigned(value, range, 8);
         }
 
-        private static float DeserializeFloatFromByteBuffer(float min, float max, ReadOnlySpan<byte> source)
+        private static float DeserializeFloatFromByteBuffer(float range, ReadOnlySpan<byte> source)
         {
-            return DequantizeFromBits(source[0], min, max, 8);
+            return Quantization.DequantizeSigned(source[0], range, 8);
         }
 
         private static void SerializeVector3ToUInt16Buffer(Vector3 v, float min, float max, Span<byte> destination)
@@ -310,18 +318,33 @@ namespace MoodyBlues
             return new Vector3(x, y, z);
         }
 
-        private static void SerializeVector3ToByteBuffer(Vector3 v, float min, float max, Span<byte> destination)
+        private static void SerializePositionToBuffer(Vector3 v, float range, Span<byte> destination)
         {
-            destination[0] = (byte)QuantizeToBits(v.x, min, max, 8);
-            destination[1] = (byte)QuantizeToBits(v.y, min, max, 8);
-            destination[2] = (byte)QuantizeToBits(v.z, min, max, 8);
+            MemoryMarshal.Cast<byte, ushort>(destination.Slice(0, 2))[0] = (ushort)Quantization.QuantizeSigned(v.x, range, 16);
+            MemoryMarshal.Cast<byte, ushort>(destination.Slice(2, 2))[0] = (ushort)Quantization.QuantizeSigned(v.y, range, 16);
+            MemoryMarshal.Cast<byte, ushort>(destination.Slice(4, 2))[0] = (ushort)Quantization.QuantizeSigned(v.z, range, 16);
         }
 
-        private static Vector3 DeserializeVector3FromByteBuffer(float min, float max, ReadOnlySpan<byte> source)
+        private static Vector3 DeserializePositionFromBuffer(float range, ReadOnlySpan<byte> source)
         {
-            float x = DequantizeFromBits(source[0], min, max, 8);
-            float y = DequantizeFromBits(source[1], min, max, 8);
-            float z = DequantizeFromBits(source[2], min, max, 8);
+            float x = Quantization.DequantizeSigned(MemoryMarshal.Cast<byte, ushort>(source.Slice(0, 2))[0], range, 16);
+            float y = Quantization.DequantizeSigned(MemoryMarshal.Cast<byte, ushort>(source.Slice(2, 2))[0], range, 16);
+            float z = Quantization.DequantizeSigned(MemoryMarshal.Cast<byte, ushort>(source.Slice(4, 2))[0], range, 16);
+            return new Vector3(x, y, z);
+        }
+
+        private static void SerializeVector3ToByteBuffer(Vector3 v, float range, Span<byte> destination)
+        {
+            destination[0] = (byte)Quantization.QuantizeSigned(v.x, range, 8);
+            destination[1] = (byte)Quantization.QuantizeSigned(v.y, range, 8);
+            destination[2] = (byte)Quantization.QuantizeSigned(v.z, range, 8);
+        }
+
+        private static Vector3 DeserializeVector3FromByteBuffer(float range, ReadOnlySpan<byte> source)
+        {
+            float x = Quantization.DequantizeSigned(source[0], range, 8);
+            float y = Quantization.DequantizeSigned(source[1], range, 8);
+            float z = Quantization.DequantizeSigned(source[2], range, 8);
             return new Vector3(x, y, z);
         }
 
@@ -354,7 +377,7 @@ namespace MoodyBlues
             for (int i = 0; i < 4; i++)
             {
                 if (i == droppedIndex) continue;
-                uint quantized = QuantizeToBits(components[i], -componentRange, componentRange, 10);
+                uint quantized = Quantization.QuantizeSigned(components[i], componentRange, 10);
                 packed |= (quantized & 0x3FFu) << shift;
                 shift += 10;
             }
@@ -374,7 +397,7 @@ namespace MoodyBlues
             {
                 if (i == droppedIndex) continue;
                 uint quantized = (packed >> shift) & 0x3FFu;
-                float value = DequantizeFromBits(quantized, -componentRange, componentRange, 10);
+                float value = Quantization.DequantizeSigned(quantized, componentRange, 10);
                 components[i] = value;
                 sumSquares += value * value;
                 shift += 10;
@@ -383,6 +406,23 @@ namespace MoodyBlues
             components[droppedIndex] = Mathf.Sqrt(Mathf.Max(0f, 1f - sumSquares));
 
             return new Quaternion(components[0], components[1], components[2], components[3]);
+        }
+
+        /// <summary>The delta rotation a receiver decodes after drop-W encoding <paramref name="delta"/>.</summary>
+        public static Quaternion RoundTripDeltaRotation(Quaternion delta)
+        {
+            Span<byte> bytes = stackalloc byte[3];
+            SerializeQuaternionDropWToBuffer(delta, DeltaRotationComponentRange, bytes);
+            return DeserializeQuaternionDropWFromBuffer(DeltaRotationComponentRange, bytes);
+        }
+
+        /// <summary>The delta rotation a receiver decodes after single-axis encoding the given axis and angle.</summary>
+        public static Quaternion RoundTripDeltaSingleAxis(byte axisId, float angleDegrees)
+        {
+            Span<byte> bytes = stackalloc byte[2];
+            SerializeDeltaSingleAxisToBuffer(axisId, angleDegrees, DeltaSingleAxisAngleRange, bytes);
+            (byte axis, float angle) = DeserializeDeltaSingleAxisFromBuffer(DeltaSingleAxisAngleRange, bytes);
+            return AxisAngle(axis, angle);
         }
 
         private static void SerializeQuaternionDropWToBuffer(Quaternion q, float componentRange, Span<byte> destination)
@@ -396,16 +436,16 @@ namespace MoodyBlues
                 w = -w;
             }
 
-            destination[0] = (byte)QuantizeToBits(x, -componentRange, componentRange, 8);
-            destination[1] = (byte)QuantizeToBits(y, -componentRange, componentRange, 8);
-            destination[2] = (byte)QuantizeToBits(z, -componentRange, componentRange, 8);
+            destination[0] = (byte)Quantization.QuantizeSigned(x, componentRange, 8);
+            destination[1] = (byte)Quantization.QuantizeSigned(y, componentRange, 8);
+            destination[2] = (byte)Quantization.QuantizeSigned(z, componentRange, 8);
         }
 
         private static Quaternion DeserializeQuaternionDropWFromBuffer(float componentRange, ReadOnlySpan<byte> source)
         {
-            float x = DequantizeFromBits(source[0], -componentRange, componentRange, 8);
-            float y = DequantizeFromBits(source[1], -componentRange, componentRange, 8);
-            float z = DequantizeFromBits(source[2], -componentRange, componentRange, 8);
+            float x = Quantization.DequantizeSigned(source[0], componentRange, 8);
+            float y = Quantization.DequantizeSigned(source[1], componentRange, 8);
+            float z = Quantization.DequantizeSigned(source[2], componentRange, 8);
 
             float sumSquares = x * x + y * y + z * z;
             float w = Mathf.Sqrt(Mathf.Max(0f, 1f - sumSquares));
@@ -413,27 +453,46 @@ namespace MoodyBlues
             return new Quaternion(x, y, z, w);
         }
 
-        private static void SerializeRotationSingleAxisToBuffer(byte axisId, float angle, float min, float max, Span<byte> destination)
+        private static void SerializeTrueSingleAxisToBuffer(byte axisId, float angle, float min, float max, Span<byte> destination)
         {
-            uint quantizedAngle = QuantizeToBits(angle, min, max, 14);
+            WriteSingleAxis(axisId, QuantizeUnsigned(angle, min, max, 14), destination);
+        }
+
+        private static void SerializeDeltaSingleAxisToBuffer(byte axisId, float angle, float range, Span<byte> destination)
+        {
+            WriteSingleAxis(axisId, Quantization.QuantizeSigned(angle, range, 14), destination);
+        }
+
+        private static void WriteSingleAxis(byte axisId, uint quantizedAngle, Span<byte> destination)
+        {
             ushort packed = (ushort)((uint)(axisId & 0x3) | (quantizedAngle << 2));
             MemoryMarshal.Cast<byte, ushort>(destination)[0] = packed;
         }
 
-        private static (byte axisId, float angle) DeserializeRotationSingleAxisFromBuffer(float min, float max, ReadOnlySpan<byte> source)
+        private static (byte axisId, float angle) DeserializeTrueSingleAxisFromBuffer(float min, float max, ReadOnlySpan<byte> source)
+        {
+            ReadSingleAxis(source, out byte axisId, out uint quantizedAngle);
+            return (axisId, DequantizeUnsigned(quantizedAngle, min, max, 14));
+        }
+
+        private static (byte axisId, float angle) DeserializeDeltaSingleAxisFromBuffer(float range, ReadOnlySpan<byte> source)
+        {
+            ReadSingleAxis(source, out byte axisId, out uint quantizedAngle);
+            return (axisId, Quantization.DequantizeSigned(quantizedAngle, range, 14));
+        }
+
+        private static void ReadSingleAxis(ReadOnlySpan<byte> source, out byte axisId, out uint quantizedAngle)
         {
             ushort packed = MemoryMarshal.Cast<byte, ushort>(source)[0];
-            byte axisId = (byte)(packed & 0x3);
-            uint quantizedAngle = (uint)(packed >> 2) & 0x3FFFu;
-            float angle = DequantizeFromBits(quantizedAngle, min, max, 14);
-            return (axisId, angle);
+            axisId = (byte)(packed & 0x3);
+            quantizedAngle = (uint)(packed >> 2) & 0x3FFFu;
         }
 
         private static void PackDeltaPositionToBuffer(Vector3 delta, float range, Span<byte> destination)
         {
-            int qx = (int)QuantizeToBits(delta.x, -range, range, 11);
-            int qy = (int)QuantizeToBits(delta.y, -range, range, 10);
-            int qz = (int)QuantizeToBits(delta.z, -range, range, 11);
+            int qx = (int)Quantization.QuantizeSigned(delta.x, range, 11);
+            int qy = (int)Quantization.QuantizeSigned(delta.y, range, 10);
+            int qz = (int)Quantization.QuantizeSigned(delta.z, range, 11);
             SerializeBitPackedXYZToBuffer(qx, qy, qz, destination);
         }
 
@@ -443,9 +502,9 @@ namespace MoodyBlues
             uint qx = packed & 0x7FFu;
             uint qy = (packed >> 11) & 0x3FFu;
             uint qz = (packed >> 21) & 0x7FFu;
-            float x = DequantizeFromBits(qx, -range, range, 11);
-            float y = DequantizeFromBits(qy, -range, range, 10);
-            float z = DequantizeFromBits(qz, -range, range, 11);
+            float x = Quantization.DequantizeSigned(qx, range, 11);
+            float y = Quantization.DequantizeSigned(qy, range, 10);
+            float z = Quantization.DequantizeSigned(qz, range, 11);
             return new Vector3(x, y, z);
         }
 
@@ -459,7 +518,7 @@ namespace MoodyBlues
         public static int SerializeTruePosition(ushort objectId, Vector3 position, Span<byte> destination)
         {
             WriteEnvelope(EventType.TruePosition, objectId, destination);
-            SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(EnvelopeSize, 6));
+            SerializePositionToBuffer(position, PositionRange, destination.Slice(EnvelopeSize, 6));
             return TruePositionSize;
         }
 
@@ -475,7 +534,7 @@ namespace MoodyBlues
         public static int SerializeTrueRotationSingleAxis(ushort objectId, byte axisId, float angle, Span<byte> destination)
         {
             WriteEnvelope(EventType.TrueRotationSingleAxis, objectId, destination);
-            SerializeRotationSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, destination.Slice(EnvelopeSize, 2));
+            SerializeTrueSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, destination.Slice(EnvelopeSize, 2));
             return TrueRotationSingleAxisSize;
         }
 
@@ -515,7 +574,7 @@ namespace MoodyBlues
         public static int SerializeDeltaRotationSingleAxis(ushort objectId, byte axisId, float angleDelta, Span<byte> destination)
         {
             WriteEnvelope(EventType.DeltaRotationSingleAxis, objectId, destination);
-            SerializeRotationSingleAxisToBuffer(axisId, angleDelta, -DeltaSingleAxisAngleRange, DeltaSingleAxisAngleRange, destination.Slice(EnvelopeSize, 2));
+            SerializeDeltaSingleAxisToBuffer(axisId, angleDelta, DeltaSingleAxisAngleRange, destination.Slice(EnvelopeSize, 2));
             return DeltaRotationSingleAxisSize;
         }
 
@@ -523,7 +582,7 @@ namespace MoodyBlues
         public static int SerializeDeltaScale(ushort objectId, Vector3 deltaScale, Span<byte> destination)
         {
             WriteEnvelope(EventType.DeltaScale, objectId, destination);
-            SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(EnvelopeSize, 3));
+            SerializeVector3ToByteBuffer(deltaScale, DeltaScaleRange, destination.Slice(EnvelopeSize, 3));
             return DeltaScaleSize;
         }
 
@@ -531,7 +590,7 @@ namespace MoodyBlues
         public static int SerializeDeltaUniformScale(ushort objectId, float deltaScale, Span<byte> destination)
         {
             WriteEnvelope(EventType.DeltaUniformScale, objectId, destination);
-            SerializeFloatToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(EnvelopeSize, 1));
+            SerializeFloatToByteBuffer(deltaScale, DeltaScaleRange, destination.Slice(EnvelopeSize, 1));
             return DeltaUniformScaleSize;
         }
 
@@ -542,7 +601,7 @@ namespace MoodyBlues
         {
             WriteEnvelope(EventType.TrueTransform, objectId, destination);
             int offset = EnvelopeSize;
-            SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
+            SerializePositionToBuffer(position, PositionRange, destination.Slice(offset, 6));
             offset += 6;
             SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
             offset += 4;
@@ -555,7 +614,7 @@ namespace MoodyBlues
         {
             WriteEnvelope(EventType.TruePositionRotation, objectId, destination);
             int offset = EnvelopeSize;
-            SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
+            SerializePositionToBuffer(position, PositionRange, destination.Slice(offset, 6));
             offset += 6;
             SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
             return TruePositionRotationSize;
@@ -577,7 +636,7 @@ namespace MoodyBlues
         {
             WriteEnvelope(EventType.TruePositionScale, objectId, destination);
             int offset = EnvelopeSize;
-            SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
+            SerializePositionToBuffer(position, PositionRange, destination.Slice(offset, 6));
             offset += 6;
             SerializeVector3ToUInt16Buffer(scale, ScaleMin, ScaleMax, destination.Slice(offset, 6));
             return TruePositionScaleSize;
@@ -588,7 +647,7 @@ namespace MoodyBlues
         {
             WriteEnvelope(EventType.TruePositionRotationUniformScale, objectId, destination);
             int offset = EnvelopeSize;
-            SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
+            SerializePositionToBuffer(position, PositionRange, destination.Slice(offset, 6));
             offset += 6;
             SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
             offset += 4;
@@ -601,9 +660,9 @@ namespace MoodyBlues
         {
             WriteEnvelope(EventType.TruePositionRotationSingleAxis, objectId, destination);
             int offset = EnvelopeSize;
-            SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
+            SerializePositionToBuffer(position, PositionRange, destination.Slice(offset, 6));
             offset += 6;
-            SerializeRotationSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, destination.Slice(offset, 2));
+            SerializeTrueSingleAxisToBuffer(axisId, angle, TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, destination.Slice(offset, 2));
             return TruePositionRotationSingleAxisSize;
         }
 
@@ -616,7 +675,7 @@ namespace MoodyBlues
             offset += 4;
             SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(offset, 3));
             offset += 3;
-            SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 3));
+            SerializeVector3ToByteBuffer(deltaScale, DeltaScaleRange, destination.Slice(offset, 3));
             return DeltaTransformSize;
         }
 
@@ -638,7 +697,7 @@ namespace MoodyBlues
             int offset = EnvelopeSize;
             SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(offset, 3));
             offset += 3;
-            SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 3));
+            SerializeVector3ToByteBuffer(deltaScale, DeltaScaleRange, destination.Slice(offset, 3));
             return DeltaRotationScaleSize;
         }
 
@@ -649,7 +708,7 @@ namespace MoodyBlues
             int offset = EnvelopeSize;
             PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
             offset += 4;
-            SerializeVector3ToByteBuffer(deltaScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 3));
+            SerializeVector3ToByteBuffer(deltaScale, DeltaScaleRange, destination.Slice(offset, 3));
             return DeltaPositionScaleSize;
         }
 
@@ -660,7 +719,7 @@ namespace MoodyBlues
             int offset = EnvelopeSize;
             PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
             offset += 4;
-            SerializeRotationSingleAxisToBuffer(axisId, angleDelta, -DeltaSingleAxisAngleRange, DeltaSingleAxisAngleRange, destination.Slice(offset, 2));
+            SerializeDeltaSingleAxisToBuffer(axisId, angleDelta, DeltaSingleAxisAngleRange, destination.Slice(offset, 2));
             return DeltaPositionRotationSingleAxisSize;
         }
 
@@ -671,7 +730,7 @@ namespace MoodyBlues
             int offset = EnvelopeSize;
             PackDeltaPositionToBuffer(deltaPosition, DeltaPositionRange, destination.Slice(offset, 4));
             offset += 4;
-            SerializeFloatToByteBuffer(deltaUniformScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 1));
+            SerializeFloatToByteBuffer(deltaUniformScale, DeltaScaleRange, destination.Slice(offset, 1));
             return DeltaPositionUniformScaleSize;
         }
 
@@ -682,7 +741,7 @@ namespace MoodyBlues
             int offset = EnvelopeSize;
             SerializeQuaternionDropWToBuffer(deltaRotation, DeltaRotationComponentRange, destination.Slice(offset, 3));
             offset += 3;
-            SerializeFloatToByteBuffer(deltaUniformScale, -DeltaScaleRange, DeltaScaleRange, destination.Slice(offset, 1));
+            SerializeFloatToByteBuffer(deltaUniformScale, DeltaScaleRange, destination.Slice(offset, 1));
             return DeltaRotationUniformScaleSize;
         }
 
@@ -732,7 +791,7 @@ namespace MoodyBlues
             offset += 2;
             MemoryMarshal.Cast<byte, ushort>(destination.Slice(offset, 2))[0] = parentObjectId;
             offset += 2;
-            SerializeVector3ToUInt16Buffer(position, -PositionRange, PositionRange, destination.Slice(offset, 6));
+            SerializePositionToBuffer(position, PositionRange, destination.Slice(offset, 6));
             offset += 6;
             SerializeQuaternionSmallestThreeToBuffer(rotation, TrueRotationComponentRange, destination.Slice(offset, 4));
             offset += 4;
@@ -766,7 +825,7 @@ namespace MoodyBlues
             int offset = EnvelopeSize;
             MemoryMarshal.Cast<byte, ushort>(destination.Slice(offset, 2))[0] = newParentObjectId;
             offset += 2;
-            SerializeVector3ToUInt16Buffer(localPosition, -PositionRange, PositionRange, destination.Slice(offset, 6));
+            SerializePositionToBuffer(localPosition, PositionRange, destination.Slice(offset, 6));
             offset += 6;
             SerializeQuaternionSmallestThreeToBuffer(localRotation, TrueRotationComponentRange, destination.Slice(offset, 4));
             offset += 4;
@@ -788,7 +847,7 @@ namespace MoodyBlues
         /// receiver is expected to refuse a stream it doesn't recognise rather than decode it
         /// optimistically -- there is no compatibility shim in either direction.
         /// </summary>
-        public const ushort ProtocolVersion = 3;
+        public const ushort ProtocolVersion = 4;
 
         /// <summary>
         /// First event on every connection, including after a reconnect. Declares the wire version

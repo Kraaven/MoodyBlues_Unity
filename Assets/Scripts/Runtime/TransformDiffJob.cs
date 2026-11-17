@@ -29,9 +29,8 @@ namespace MoodyBlues
         [NativeDisableParallelForRestriction]
         public NativeArray<SampledTransform> Sampled;
 
-        public float PositionEpsilon;
-        public float ScaleEpsilon;
-        public float RotationDotEpsilon;
+        /// <summary>The change gate, by value so Burst never reads managed statics.</summary>
+        public DeltaChangeGate Gate;
 
         public void Execute(int index, TransformAccess transform)
         {
@@ -44,17 +43,17 @@ namespace MoodyBlues
             TrackedState last = States[index];
 
             byte mask = 0;
-            if (!ApproximatelyEqual(position, last.LastSentPosition, PositionEpsilon))
+            if (Gate.PositionChanged(position, last.LastSentPosition))
             {
                 mask |= SampledTransform.PositionChangedBit;
             }
 
-            if (!ApproximatelyEqualRotation(rotation, last.LastSentRotation, RotationDotEpsilon))
+            if (Gate.RotationChanged(rotation, last.LastSentRotation))
             {
                 mask |= SampledTransform.RotationChangedBit;
             }
 
-            if (!ApproximatelyEqual(scale, last.LastSentScale, ScaleEpsilon))
+            if (Gate.ScaleChanged(scale, last.LastSentScale))
             {
                 mask |= SampledTransform.ScaleChangedBit;
             }
@@ -66,29 +65,6 @@ namespace MoodyBlues
                 Scale = scale,
                 ChangedMask = mask,
             };
-        }
-
-        // Written as explicit float math rather than calling Mathf/Quaternion helpers so the whole
-        // comparison is unambiguously Burst-compilable. TransformEventDispatcher exposes the same
-        // logic for the main-thread paths, and both read their epsilons from the constants there,
-        // so the two cannot silently disagree.
-
-        public static bool ApproximatelyEqual(Vector3 a, Vector3 b, float epsilon)
-        {
-            float dx = a.x - b.x; if (dx < 0f) dx = -dx;
-            float dy = a.y - b.y; if (dy < 0f) dy = -dy;
-            float dz = a.z - b.z; if (dz < 0f) dz = -dz;
-            return dx < epsilon && dy < epsilon && dz < epsilon;
-        }
-
-        public static bool ApproximatelyEqualRotation(Quaternion a, Quaternion b, float dotEpsilon)
-        {
-            // |dot| of two unit quaternions is 1 when they represent the same rotation. The
-            // absolute value is what makes q and -q compare equal, which they must, since they
-            // are the same rotation.
-            float dot = (a.x * b.x) + (a.y * b.y) + (a.z * b.z) + (a.w * b.w);
-            if (dot < 0f) dot = -dot;
-            return dot >= dotEpsilon;
         }
     }
 }

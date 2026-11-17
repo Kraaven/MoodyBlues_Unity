@@ -235,6 +235,12 @@ matching upload from the build. Use runtime export for such scenes.
   back out of its own bytes (`SerializerDecode.TryApplyTransformEvent`). The backend uses the same
   arithmetic, so error stays within one quantization step however long the session runs
   (Spec 11).
+- **Zero is exact, and a stopped object is silent (protocol v4).** Signed fields are quantized
+  symmetrically (`(float)q * (R / (float)L)`, Spec 9), so a still component decodes to exactly 0.
+  A property counts as changed only if its delta quantizes to a non-zero code (Spec 9.1), and a
+  pure single-axis rotation is sent as the 2-byte single-axis event because it is the more
+  accurate encoding (Spec 6.5). The default per-tick rotation range is +/-0.25 per component
+  (about 29 degrees per tick).
 - **No silent clipping.** A delta that does not fit its range is promoted to an absolute event
   instead of being clamped. Only a value beyond the absolute range is clamped; that is counted in
   `HardClamps`, and the dashboard shows a warning.

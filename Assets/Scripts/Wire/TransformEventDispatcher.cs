@@ -28,9 +28,9 @@ namespace MoodyBlues
         public byte PromotedMask;
 
         /// <summary>
-        /// A rotation delta that was axis-aligned but too large for the 2-byte single-axis
-        /// encoding, so the 3-byte drop-W form was used instead. Costs one byte; purely a
-        /// signal that the single-axis angle range is tight.
+        /// A rotation delta for which single-axis would have been the more accurate encoding but
+        /// its angle exceeds the single-axis range, so the 3-byte drop-W form was used instead.
+        /// Costs one byte; purely a signal that the single-axis angle range is tight.
         /// </summary>
         public bool RotationWidened;
 
@@ -46,9 +46,9 @@ namespace MoodyBlues
     /// <summary>
     /// Picks the smallest wire event that covers whatever changed on a transform this tick and
     /// serializes it into the destination span (called from MoodyBluesStreamer.EnqueueTransform).
-    /// Event selection rules live in Spec.md Section 6.5; this class also owns the epsilon checks
-    /// (HasPositionChanged/HasRotationChanged/HasScaleChanged) that decide "did this change enough
-    /// to care about" for both the caller's gating and this dispatcher's own property selection.
+    /// Event selection rules live in Spec.md Section 6.5; this class also exposes the change gate
+    /// (HasPositionChanged/HasRotationChanged/HasScaleChanged, Spec.md Section 9.1) that decides
+    /// whether a property changed at all.
     ///
     /// Ranges are deliberately tight so precision stays concentrated where motion actually lives.
     /// Values that fall outside them are *promoted* to a wider encoding rather than clamped: a
@@ -57,26 +57,22 @@ namespace MoodyBlues
     /// </summary>
     public static class TransformEventDispatcher
     {
-        // Public so TransformDiffJob can be handed the same values -- the job needs them as
-        // fields (Burst can't read managed statics), and duplicating the numbers there would let
-        // the job and the main-thread paths silently drift apart.
-        public const float PositionEpsilon = 0.0001f;
-        public const float ScaleEpsilon = 0.0001f;
-        public const float RotationDotEpsilon = 0.999999f; // ~0.08 degree tolerance for "unchanged"
-
         private const float UniformScaleEpsilon = 0.0005f;
-        private const float SingleAxisAlignmentDegrees = 0.25f; // how close to a cardinal axis counts as "single axis"
 
         public enum Axis : byte { X = 0, Y = 1, Z = 2 }
 
+        // "Changed" means the encoding sees it: the delta quantizes to a non-zero code (see
+        // DeltaChangeGate). TransformDiffJob runs the same gate per tick; these are for the
+        // main-thread paths (reactivation, spawn pose, start-of-recording snapshot).
+
         public static bool HasPositionChanged(Vector3 current, Vector3 previous) =>
-            !TransformDiffJob.ApproximatelyEqual(current, previous, PositionEpsilon);
+            Serializer.ChangeGate.PositionChanged(current, previous);
 
         public static bool HasRotationChanged(Quaternion current, Quaternion previous) =>
-            !TransformDiffJob.ApproximatelyEqualRotation(current, previous, RotationDotEpsilon);
+            Serializer.ChangeGate.RotationChanged(current, previous);
 
         public static bool HasScaleChanged(Vector3 current, Vector3 previous) =>
-            !TransformDiffJob.ApproximatelyEqual(current, previous, ScaleEpsilon);
+            Serializer.ChangeGate.ScaleChanged(current, previous);
 
         /// <summary>
         /// Serializes the best-fit event into destination (at least Serializer.MaxEventSize long).
@@ -143,7 +139,7 @@ namespace MoodyBlues
             if (!positionChanged && !rotationChanged && !scaleChanged) return 0;
 
             Quaternion deltaRotation = rotationChanged
-                ? Quaternion.Inverse(data.previousRotation) * data.currentRotation
+                ? DeltaChangeGate.RelativeRotation(data.previousRotation, data.currentRotation)
                 : Quaternion.identity;
             Vector3 deltaPosition = positionChanged ? data.currentPosition - data.previousPosition : Vector3.zero;
             Vector3 deltaScale = scaleChanged ? data.currentScale - data.previousScale : Vector3.zero;
@@ -159,27 +155,28 @@ namespace MoodyBlues
             }
 
             // Rotation has a three-rung ladder: single-axis (2 bytes) -> drop-W (3 bytes) ->
-            // absolute smallest-three. The single-axis range is by far the tightest thing in the
-            // protocol, and axis-aligned spin is the most common rotation there is, so this rung
-            // matters more than it looks: without it a cardinal-axis spin faster than the
-            // single-axis ceiling would be silently recorded at the ceiling speed.
+            // absolute smallest-three. Between the first two the choice is by accuracy: both are
+            // encoded and decoded exactly as the receiver will, and single-axis wins ties. A pure
+            // yaw or pitch is exactly representable as one axis, so it wins; a tilted spin leaves
+            // off-axis error that drop-W represents better. Without the single-axis rung an
+            // axis-aligned spin would cost a byte more on every tick.
             Axis axis = default;
             float angleDeg = 0f;
             bool deltaRotationIsSingleAxis = false;
 
             if (rotationChanged)
             {
-                if (TryGetSingleAxis(deltaRotation, out axis, out angleDeg))
+                angleDeg = DeltaChangeGate.SingleAxisAngleDegrees(deltaRotation, out int axisIndex);
+                axis = (Axis)axisIndex;
+
+                if (Serializer.FitsDeltaSingleAxisAngle(angleDeg))
                 {
-                    if (Serializer.FitsDeltaSingleAxisAngle(angleDeg))
-                    {
-                        deltaRotationIsSingleAxis = true;
-                    }
-                    else
-                    {
-                        // Axis-aligned but spinning too fast for 2 bytes: fall to drop-W.
-                        rotationWidened = true;
-                    }
+                    deltaRotationIsSingleAxis = SingleAxisIsMoreAccurate(deltaRotation, axis, angleDeg);
+                }
+                else if (WouldBeMoreAccurateAsSingleAxis(deltaRotation, axis, angleDeg))
+                {
+                    // Axis-aligned but spinning too fast for 2 bytes: fall to drop-W.
+                    rotationWidened = true;
                 }
 
                 if (!deltaRotationIsSingleAxis && !Serializer.FitsDeltaRotation(deltaRotation))
@@ -290,57 +287,27 @@ namespace MoodyBlues
         }
 
         /// <summary>
-        /// True if rotation's axis-angle representation is closely aligned with one cardinal axis;
-        /// outs that axis and the signed angle in degrees around it. Whether that angle actually
-        /// *fits* the single-axis encoding is a separate question -- see
-        /// Serializer.FitsDeltaSingleAxisAngle.
+        /// True if the single-axis candidate, decoded as the receiver would, is at least as close
+        /// to <paramref name="delta"/> as the decoded drop-W candidate.
         /// </summary>
-        private static bool TryGetSingleAxis(Quaternion rotation, out Axis axis, out float signedAngleDegrees)
+        private static bool SingleAxisIsMoreAccurate(Quaternion delta, Axis axis, float angleDeg)
         {
-            rotation.ToAngleAxis(out float angle, out Vector3 rotationAxis);
+            float singleError = DeltaChangeGate.RotationError(Serializer.RoundTripDeltaSingleAxis((byte)axis, angleDeg), delta);
+            float dropWError = DeltaChangeGate.RotationError(Serializer.RoundTripDeltaRotation(delta), delta);
+            return singleError <= dropWError;
+        }
 
-            // Zero-length axis (identity/near-identity rotation) -- treat as "no rotation".
-            if (rotationAxis.sqrMagnitude < 1e-8f)
-            {
-                axis = Axis.X;
-                signedAngleDegrees = 0f;
-                return true;
-            }
-
-            rotationAxis.Normalize();
-
-            Vector3 absAxis = new Vector3(Mathf.Abs(rotationAxis.x), Mathf.Abs(rotationAxis.y), Mathf.Abs(rotationAxis.z));
-
-            Axis bestAxis = absAxis.x >= absAxis.y && absAxis.x >= absAxis.z ? Axis.X
-                           : absAxis.y >= absAxis.z ? Axis.Y
-                           : Axis.Z;
-
-            float alignment = bestAxis switch
-            {
-                Axis.X => absAxis.x,
-                Axis.Y => absAxis.y,
-                _ => absAxis.z
-            };
-
-            // alignment == 1 means the axis is exactly (+/-1,0,0)-like; convert the tolerance to cosine.
-            float cosTolerance = Mathf.Cos(SingleAxisAlignmentDegrees * Mathf.Deg2Rad);
-            if (alignment < cosTolerance)
-            {
-                axis = default;
-                signedAngleDegrees = 0f;
-                return false;
-            }
-
-            float sign = bestAxis switch
-            {
-                Axis.X => Mathf.Sign(rotationAxis.x),
-                Axis.Y => Mathf.Sign(rotationAxis.y),
-                _ => Mathf.Sign(rotationAxis.z)
-            };
-
-            axis = bestAxis;
-            signedAngleDegrees = angle * sign;
-            return true;
+        /// <summary>
+        /// Same comparison for an angle beyond the single-axis range, where the candidate cannot
+        /// be encoded: it uses the exact (unquantized) axis-angle rotation, whose only error is
+        /// the off-axis residue.
+        /// </summary>
+        private static bool WouldBeMoreAccurateAsSingleAxis(Quaternion delta, Axis axis, float angleDeg)
+        {
+            Vector3 unit = axis == Axis.X ? Vector3.right : axis == Axis.Y ? Vector3.up : Vector3.forward;
+            float singleError = DeltaChangeGate.RotationError(Quaternion.AngleAxis(angleDeg, unit), delta);
+            float dropWError = DeltaChangeGate.RotationError(Serializer.RoundTripDeltaRotation(delta), delta);
+            return singleError <= dropWError;
         }
     }
 }

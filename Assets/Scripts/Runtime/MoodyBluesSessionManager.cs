@@ -324,9 +324,7 @@ namespace MoodyBlues
             {
                 States = _states.AsArray(),
                 Sampled = _sampled.AsArray(),
-                PositionEpsilon = TransformEventDispatcher.PositionEpsilon,
-                ScaleEpsilon = TransformEventDispatcher.ScaleEpsilon,
-                RotationDotEpsilon = TransformEventDispatcher.RotationDotEpsilon,
+                Gate = Serializer.ChangeGate,
             };
 
             // Scheduled and completed within this tick: no user code can run in between, so the

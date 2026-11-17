@@ -1,9 +1,14 @@
 # MoodyBlues Wire Protocol Spec
 
-Protocol version **3** (`Serializer.ProtocolVersion`). Version 3 shrank `BeginSession` to 19
-bytes (16-bit float ranges, Section 6.1) and `Log` to 32 bytes (Section 6.7), and spawns now
-cover the clone's whole subtree (Section 6.2). Version 2 added the `Log` event. The backend
-accepts version 3 only and refuses older clients.
+Protocol version **4** (`Serializer.ProtocolVersion`). Version 4 changed only quantization and
+change detection; event ids, sizes, field layouts and the `BeginSession` layout are unchanged.
+Every signed field is now quantized symmetrically so zero is exactly representable (Section 9);
+a property counts as changed only if the encoding that would carry it can see the change
+(Section 9.1); a single-axis rotation delta is chosen by accuracy rather than by an alignment
+tolerance (Section 6.5); and the default `DeltaRotationComponentRange` is 0.25. Version 3 shrank
+`BeginSession` to 19 bytes (16-bit float ranges, Section 6.1) and `Log` to 32 bytes (Section
+6.7), and spawns now cover the clone's whole subtree (Section 6.2). Version 2 added the `Log`
+event. The backend accepts version 4 only and refuses older clients.
 
 This document describes the binary protocol streamed by the Unity client over a WebSocket
 connection, plus the HTTP handshake and scene export that precede it (Section 13). It is intended
@@ -356,8 +361,9 @@ starting transform from the separate export (Section 5), sending a redundant abs
 moment polling begins would waste bytes.
 
 **Ordinary case -- Delta, gated on actual change.** Each tracked object's position/rotation/scale
-are compared against the last value *sent* for it, using the epsilons in Section 9.1. If nothing
-changed, nothing is emitted for that object this tick. Otherwise the smallest combined `Delta*`
+are compared against the last value *sent* for it, using the change gate in Section 9.1 (a
+property changed only if its delta quantizes to a non-zero code). If nothing changed, nothing is
+emitted for that object this tick. Otherwise the smallest combined `Delta*`
 event covering exactly the changed properties is used, applying the uniform-scale and
 single-axis-rotation special cases wherever they save bytes.
 
@@ -370,7 +376,7 @@ which is the scene export's pose unless the snapshot re-sent it.
 1. **Newly spawned objects** get `InstantiateObject`, which already carries a full transform.
 2. **Reactivated objects.** Hidden objects are not polled, so the client cannot know whether one
    moved while hidden and cannot trust its stale baseline. On reactivation it compares the current
-   transform against the last sent value and, only if they differ, emits `ShowObject` immediately
+   transform against the last sent value (change gate, Section 9.1) and, only if they differ, emits `ShowObject` immediately
    followed by an absolute event in the same batch. If it did not move, only `ShowObject` is sent.
 3. **Range overflow (promotion).** If a delta cannot be represented in its range, the whole event
    is promoted to the `True*` variant covering the same properties, rather than clamped. See
@@ -381,12 +387,19 @@ which is the scene export's pose unless the snapshot re-sent it.
 5. **Start-of-recording snapshot.** Objects that moved since the scene loaded get one
    `TrueTransform` at the start of each recording (Section 8.5).
 
-**Rotation has a three-rung ladder.** An axis-aligned rotation delta uses the 2-byte single-axis
-form if the angle fits `DeltaSingleAxisAngleRange`; otherwise the 3-byte drop-W form (one extra
-byte, reported in `RotationWidenings`); otherwise absolute. The single-axis range is the tightest
-in the protocol and axis-aligned spin is the most common rotation there is, so this rung matters:
-without it, a cardinal-axis spin faster than the range would be recorded at the range's ceiling
-speed.
+**Rotation has a three-rung ladder: single-axis (2 bytes), drop-W (3 bytes), absolute.** For a
+changed rotation delta `d` (hemisphere forced to w >= 0), the client takes the axis with the
+largest |x|, |y|, |z| and the signed angle `2 * atan2(d.axis, d.w)` in degrees. If that angle fits
+`DeltaSingleAxisAngleRange`, it encodes both the single-axis and the drop-W form, decodes each
+exactly as a receiver would, and sends the single-axis form if its decoded rotation is at least as
+close to `d` as the decoded drop-W one (ties go to the 2-byte form); otherwise drop-W. A pure yaw
+or pitch is exactly representable as one axis and so always wins; a tilted rotation leaves
+off-axis error that drop-W represents better. If single-axis would have been the more accurate
+form but its angle exceeds the range, the 3-byte drop-W form is sent (one extra byte, reported in
+`RotationWidenings`). If drop-W does not fit either, the event is promoted to absolute. The
+single-axis range is the tightest in the protocol and axis-aligned spin is the most common
+rotation there is, so this rung matters: without it, a cardinal-axis spin faster than the range
+would be recorded at the range's ceiling speed.
 
 ### 6.6 Prefab template library
 
@@ -459,16 +472,16 @@ little-endian; `|` separates fields for readability only and is not in the strea
 Sent immediately on connect, before anything buffered.
 
 ```
-1D | 03 00 | 00 51 | D0 5F | 00 BC | 00 49 | 00 3E | 00 38 | 00 40 | 00 3C
+1D | 04 00 | 00 51 | D0 5F | 00 BC | 00 49 | 00 3E | 00 34 | 00 40 | 00 3C
 
 1D      EventType 29 (BeginSession)
-03 00   ProtocolVersion = 3
+04 00   ProtocolVersion = 4
 00 51   CaptureHz                   = 40.0   (half 0x5100)
 D0 5F   PositionRange               = 500.0  (half 0x5FD0)
 00 BC   ScaleMin                    = -1.0   (half 0xBC00)
 00 49   ScaleMax                    = 10.0   (half 0x4900)
 00 3E   DeltaPositionRange          = 1.5    (half 0x3E00)
-00 38   DeltaRotationComponentRange = 0.5    (half 0x3800)
+00 34   DeltaRotationComponentRange = 0.25   (half 0x3400)
 00 40   DeltaSingleAxisAngleRange   = 2.0    (half 0x4000)
 00 3C   DeltaScaleRange             = 1.0    (half 0x3C00)
 ```
@@ -481,23 +494,32 @@ One `TimeStamp` then one event per changed object. Here: game time 12.5 s, objec
 object 4660 rotated about Y by 1 degree.
 
 ```
-18 | 00 00 00 00 00 00 29 40 | 06 | 01 00 | 22 CC 8F 88 | 08 | 34 12 | <2 bytes>
+18 | 00 00 00 00 00 00 29 40 | 06 | 01 00 | 21 C4 6F 88 | 08 | 34 12 | FD BF
 
 18                        EventType 24 (TimeStamp)
 00 00 00 00 00 00 29 40   Seconds = 12.5  (IEEE-754 double)
 
 06                        EventType 6 (DeltaPosition)
 01 00                     ObjectID 1
-22 CC 8F 88               packed uint32 0x888FCC22:
-                            bits  0-10 = 1058 -> x = +0.0500 (11 bits over +/-1.5)
-                            bits 11-20 =  505 -> y = -0.0200 (10 bits)
-                            bits 21-31 = 1092 -> z = +0.1001 (11 bits)
+21 C4 6F 88               packed uint32 0x886FC421, for a move of (+0.05, -0.02, +0.1001):
+                            x: q = round(0.05   / (1.5/1023)) = +34, u = 1023 + 34 = 1057
+                               -> decodes to 34 * (1.5/1023) = +0.04985
+                            y: q = round(-0.02  / (1.5/511))  =  -7, u =  511 -  7 =  504
+                               -> decodes to -7 * (1.5/511)   = -0.02055
+                            z: q = round(0.1001 / (1.5/1023)) = +68, u = 1023 + 68 = 1091
+                               -> decodes to 68 * (1.5/1023)  = +0.09971
+                            bits  0-10 = 1057, bits 11-20 = 504, bits 21-31 = 1091:
+                            1057 | (504 << 11) | (1091 << 21) = 0x886FC421
 
 08                        EventType 8 (DeltaRotationSingleAxis)
 34 12                     ObjectID 4660
-<2 bytes>                 bits 0-1 = axis (1 = Y), bits 2-15 = 14-bit angle over +/-2 deg
+FD BF                     uint16 0xBFFD: bits 0-1 = axis = 1 (Y), bits 2-15 = 12287:
+                            q = round(1.0 / (2/8191)) = 4096, u = 8191 + 4096 = 12287
+                            -> decodes to 4096 * (2/8191) = +1.00012 deg
+                            (1 | (12287 << 2) = 0xBFFD, little-endian FD BF)
 ```
 
+The rotation is a pure rotation about Y, so the single-axis form wins on accuracy (Section 6.5).
 Total 9 + 7 + 5 = 21 bytes for that tick. A tick in which nothing moved emits **nothing at all**,
 not even a `TimeStamp`.
 
@@ -634,8 +656,8 @@ by, in this order:
 3. `ReparentObject` for those spawns, for spawn children whose parent is no longer their template
    parent, and for objects tracked at `Start` whose parent has changed. Then `DeleteObject` for
    spawn children destroyed since they spawned.
-4. `TrueTransform` for objects tracked at `Start` whose local transform has changed (objects
-   reparented in step 3 already carried theirs).
+4. `TrueTransform` for objects tracked at `Start` whose local transform has changed, by the
+   change gate of Section 9.1 (objects reparented in step 3 already carried theirs).
 5. `ShowObject` / `HideObject` for objects tracked at `Start` whose active state changed, and
    `HideObject` for inactive spawn roots.
 
@@ -651,32 +673,78 @@ The snapshot is written before the socket is open, so the ring buffer has to hol
 
 ## 9. Quantization reference
 
-All quantization maps a float range `[min, max]` onto an unsigned integer of `bits` bits by linear
-remap, round-to-nearest, and clamp; dequantization is the exact inverse remap. Lossy but
-deterministic and bounded.
-
 Ranges marked *tunable* are declared per session in `BeginSession` -- the values shown are the
-defaults.
+defaults. Quantization is lossy but deterministic and bounded. There are two forms.
 
-### 9.1 "Did this change" epsilons (informational)
+**Signed fields (`+/-R`) use symmetric quantization, so zero is exact.** For an `n`-bit field:
 
-A property is only re-sent once it moves by more than: position 0.0001 units, scale 0.0001 units,
-rotation quaternion dot >= 0.999999 (about 0.08 deg). Uniform-scale detection uses 0.0005;
-single-axis alignment uses 0.25 deg.
+```
+L    = 2^(n-1) - 1                       8 bit: 127, 10 bit: 511, 11 bit: 1023,
+                                         14 bit: 8191, 16 bit: 32767
+float step = (float)(R / (float)L);      normative form: round the quotient to float32
+encode: q = clamp(round(v / step), -L, +L);   stored unsigned u = q + L      (u in [0, 2L])
+decode: q = (int)u - L;   float v = (float)((float)q * step)
+```
 
-These affect *when* the client sends, not how to decode.
+`u = 2^n - 1` is never emitted; a decoder **MUST** treat it as a protocol error (invalid message).
+Decode must use exactly this float32 arithmetic, with the explicit `(float)` casts as written
+(`step` rounded to float32 first, then the product rounded to float32), because the client
+baselines its deltas on its own decoded values (Section 11). The casts are normative: a runtime
+that keeps extended-precision intermediates (some Mono and JIT configurations do) disagrees in
+the last bit, and the decoder's reconstruction then slowly leaves the client's. Rounding at encode time is not
+normative: any encoder that produces a valid `u` is decodable.
 
-### 9.2 Scalar, 16-bit
+Why symmetric: an even number of levels over `[-R, R]` (the former `[0, 2^n - 1]` remap) has no
+code for zero, so a still component of a delta was sent as plus or minus half a step, alternating
+every tick. With `L` levels each side, zero is code `L` and a still component decodes to exactly 0.
 
-`ushort`, remap `[min,max]` -> `[0, 65535]`.
+Signed fields: absolute position (3x16-bit, `+/-PositionRange`), smallest-three quaternion
+components (10-bit, `+/-0.70711`), delta position (11/10/11-bit), delta rotation drop-W components
+(8-bit), delta scale and delta uniform scale (8-bit), and the delta single-axis angle (14-bit).
+
+**Unsigned fields** use a linear remap of `[min, max]` onto `[0, 2^n - 1]` with round-to-nearest
+and clamp, and the exact inverse remap to decode: absolute scale and absolute uniform scale
+(`ScaleMin..ScaleMax`, 16-bit) and the absolute single-axis angle (`0..360`, 14-bit). Every code
+`0..2^n - 1` is valid.
+
+### 9.1 The change gate
+
+A property counts as changed only if the encoding that would carry it can see the change: its
+delta against the last-sent (decoded) baseline must quantize to a non-zero code, or fall outside
+the delta range (which is promoted, Section 10.2).
+
+- *Position:* delta = current - baseline; changed if any of the 11/10/11-bit codes is non-zero
+  (that is, a component moved by more than half a step: 1.5/1023/2 in x and z, 1.5/511/2 in y).
+- *Rotation:* delta = inverse(baseline) * current with the hemisphere forced to w >= 0; changed
+  if any drop-W code `q` is non-zero (a delta outside the drop-W range also counts, and is
+  promoted). A delta that drop-W rounds to all zero is not a change, whatever a single-axis
+  candidate would encode; Section 6.5 only chooses the encoding for a rotation that did change.
+- *Scale:* changed if any 8-bit delta code is non-zero.
+
+Motion below half a step therefore accumulates against the unchanged baseline until it crosses
+half a step, then one step is emitted; reconstruction error stays bounded by half a step, and an
+object that has stopped emits nothing. (After an absolute event, whose steps are coarser than the
+delta steps, the decoded baseline can sit a little off the true value; up to a few small delta
+events refine it and then the object is strictly silent.) The same gate is used wherever the client
+compares a current transform against a last-sent one: the per-tick diff, the reactivation check
+(Section 6.5) and the start-of-recording snapshot (Section 8.5). Uniform-scale detection compares
+the three delta components with a tolerance of 0.0005.
+
+The gate affects *when* the client sends, not how to decode.
+
+### 9.2 Scalar, 16-bit (unsigned)
+
+`ushort`, remap `[min,max]` -> `[0, 65535]`. Used for scale.
 
 ### 9.3 Vector3, 3x16-bit
 
-Each component independently per 9.2, written x then y then z.
+Each component independently, written x then y then z: per 9.2 for scale, symmetric over
+`+/-PositionRange` (`L` = 32767) for position.
 
 ### 9.4 Scalar / Vector3, 8-bit
 
-`byte` per component, remap `[min,max]` -> `[0, 255]`.
+`byte` per component, symmetric over `+/-DeltaScaleRange` (`L` = 127), for delta scale and delta
+uniform scale.
 
 ### 9.5 Quaternion, smallest-three (4 bytes, absolute rotations)
 
@@ -684,7 +752,7 @@ Each component independently per 9.2, written x then y then z.
    negative, negate all four components first (q and -q are the same rotation, so this forces a
    canonical hemisphere).
 2. Pack a `uint32`: bits 0-1 = dropped index (0=x, 1=y, 2=z, 3=w); then the other three
-   components in ascending index order, 10 bits each, over +/-0.70711.
+   components in ascending index order, 10 bits each, symmetric over +/-0.70711 (`L` = 511).
 3. To decode: read the three stored components, dequantize, then reconstruct the dropped one as
    `sqrt(max(0, 1 - sumOfSquares))` -- always non-negative, consistent with step 1.
 
@@ -694,12 +762,14 @@ already the tightest correct bound. Not tunable.
 ### 9.6 Rotation, single axis (2 bytes)
 
 `ushort`: bits 0-1 = axis (0=X, 1=Y, 2=Z), bits 2-15 = 14-bit angle in degrees. Range 0..360 for
-absolute rotations, +/-`DeltaSingleAxisAngleRange` (*tunable*, default 2.0) for deltas.
+absolute rotations (unsigned remap, 9), and symmetric over +/-`DeltaSingleAxisAngleRange`
+(*tunable*, default 2.0, `L` = 8191) for deltas.
 
 ### 9.7 Delta position, packed 11/10/11 (4 bytes)
 
 A `uint32`: x in bits 0-10 (11 bits), y in bits 11-20 (10 bits), z in bits 21-31 (11 bits), each
-over +/-`DeltaPositionRange` (*tunable*, default 1.5).
+symmetric over +/-`DeltaPositionRange` (*tunable*, default 1.5): x and z with `L` = 1023, y with
+`L` = 511.
 
 Y gets one bit fewer because the three fields have to fit 32 bits; vertical motion is usually the
 least precision-critical of the three.
@@ -707,8 +777,8 @@ least precision-critical of the three.
 ### 9.8 Quaternion, drop-W (3 bytes, delta rotations)
 
 Like 9.5 but always drops W specifically -- forcing W's hemisphere non-negative rather than the
-largest component's -- and stores only x/y/z as 8-bit values over
-+/-`DeltaRotationComponentRange` (*tunable*, default 0.5).
+largest component's -- and stores only x/y/z as 8-bit values, symmetric over
++/-`DeltaRotationComponentRange` (*tunable*, default 0.25, `L` = 127).
 
 Decode: dequantize x/y/z, then `w = sqrt(max(0, 1 - x*x - y*y - z*z))`.
 
@@ -779,7 +849,8 @@ to shed accumulated magnitude error.
 ## 11. Precision guarantee
 
 The reconstruction error for any property is **bounded by one quantization step of whichever
-encoding carried it, independent of how long the session runs**.
+encoding carried it, independent of how long the session runs** (and by half a step for a
+property that has stopped moving, by the change gate of Section 9.1).
 
 This holds because the client encodes deltas against *the value it last actually transmitted* --
 decoded back out of the bytes it wrote -- rather than against the true float. The sender therefore
@@ -787,19 +858,20 @@ tracks exactly what the decoder reconstructs, and per-tick rounding error cannot
 
 | Quantity | Encoding | Step size | Max per-tick change |
 |---|---|---|---|
-| Absolute position | 16 bits over +/-500 | 0.015259 units | n/a |
-| Absolute scale | 16 bits over -1..10 | 0.00016785 units | n/a |
-| Absolute rotation | 10 bits/component over +/-0.70711 | 0.001382 | n/a |
-| Absolute single-axis angle | 14 bits over 0..360 | 0.021974 deg | n/a |
-| Delta position x,z | 11 bits over +/-1.5 | 0.0014656 units | 1.5 units |
-| Delta position y | 10 bits over +/-1.5 | 0.0029326 units | 1.5 units |
-| Delta rotation component | 8 bits over +/-0.5 | 0.0039216 | about 60 deg |
-| Delta single-axis angle | 14 bits over +/-2 | 0.00024416 deg | 2 deg |
-| Delta scale | 8 bits over +/-1 | 0.0078431 units | 1.0 units |
+| Absolute position | 16 bits over +/-500 (L = 32767) | 500/32767 = 0.015259 units | n/a |
+| Absolute scale | 16 bits over -1..10 (unsigned) | 0.00016785 units | n/a |
+| Absolute rotation | 10 bits/component over +/-0.70711 (L = 511) | 0.70711/511 = 0.0013838 | n/a |
+| Absolute single-axis angle | 14 bits over 0..360 (unsigned) | 0.021974 deg | n/a |
+| Delta position x,z | 11 bits over +/-1.5 (L = 1023) | 1.5/1023 = 0.0014663 units | 1.5 units |
+| Delta position y | 10 bits over +/-1.5 (L = 511) | 1.5/511 = 0.0029354 units | 1.5 units |
+| Delta rotation component | 8 bits over +/-0.25 (L = 127) | 0.25/127 = 0.0019685 | about 29 deg (2 asin 0.25 = 28.96) |
+| Delta single-axis angle | 14 bits over +/-2 (L = 8191) | 2/8191 = 0.00024417 deg | 2 deg |
+| Delta scale | 8 bits over +/-1 (L = 127) | 1/127 = 0.0078740 units | 1.0 units |
 
 At the default 40 Hz capture rate, the per-tick limits correspond to roughly 60 units/s of
-translation, 2400 deg/s of rotation via drop-W, 80 deg/s via the single-axis form, and 40 units/s
-of scale change. Exceeding any of them triggers promotion (Section 10.2) rather than error.
+translation, 1160 deg/s of rotation via drop-W (a component of 0.25 on one axis), 80 deg/s via the
+single-axis form, and 40 units/s of scale change. Exceeding any of them triggers promotion
+(Section 10.2) rather than error.
 
 Absolute position is the one hard ceiling: nothing is wider than +/-`PositionRange`, so objects
 outside it cannot be recorded correctly and are reported in `HardClamps`.
@@ -810,7 +882,7 @@ outside it cannot be recorded correctly and are reported in `HardClamps`.
 
 | Constant | Value | Source |
 |---|---|---|
-| Protocol version | 3 (the backend refuses any other) | `Serializer.ProtocolVersion` |
+| Protocol version | 4 (the backend refuses any other) | `Serializer.ProtocolVersion` |
 | Ring buffer capacity | max(256 KB, 4 x message size) | `MoodyBluesStreamer.MinRingBufferCapacity`, `RingBufferMessages` (private) |
 | Ring buffer headroom per write | `Serializer.MaxEventSize` | `MoodyBluesStreamer.WriteToAccumulator` |
 | Max packet (message) size | 8, 32 or 128 KB (config Message Size; default 8 KB) | `MoodyBluesClientConfig.MessageSizeBytes` |
@@ -1101,6 +1173,14 @@ is set by any operation that *could* change the matrix without comparing old and
 it yields false positives. Worse, it is shared global state any script can write: a library that
 cleared it would silently break the host game's own use of it. Change detection compares values
 instead.
+
+**Quantizing signed fields with an even number of levels over `[-R, R]`.** Zero has no code, so a
+still component is sent as plus or minus half a step, alternating each tick; measured on real
+recordings that was most delta components. Symmetric quantization (Section 9) makes zero exact.
+
+**An epsilon-based change test finer than the quantization step.** A stopped object then never
+counts as stopped: its decoded baseline never equals its true value, so it emitted a delta every
+tick forever. The change gate (Section 9.1) asks whether the encoding sees the change instead.
 
 **Clamping out-of-range deltas.** See Section 10.2. The error is permanent rather than
 single-frame, so the range is widened per-event instead.

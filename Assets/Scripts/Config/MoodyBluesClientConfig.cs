@@ -41,7 +41,7 @@ namespace MoodyBlues
         public const float DefaultScaleMin = -1f;
         public const float DefaultScaleMax = 10f;
         public const float DefaultDeltaPositionRange = 1.5f;
-        public const float DefaultDeltaRotationComponentRange = 0.5f;
+        public const float DefaultDeltaRotationComponentRange = 0.25f;
         public const float DefaultDeltaSingleAxisAngleRange = 2f;
         public const float DefaultDeltaScaleRange = 1f;
 
@@ -106,8 +106,8 @@ namespace MoodyBlues
                  "is a 60 units/second speed limit before events get promoted to absolute.")]
         [SerializeField] private float deltaPositionRange = DefaultDeltaPositionRange;
 
-        [Tooltip("Max per-tick rotation as a quaternion component magnitude. 0.5 covers about 60 " +
-                 "degrees of rotation in a single tick (2400 deg/s at 40Hz).")]
+        [Tooltip("Max per-tick rotation as a quaternion component magnitude. 0.25 covers about 29 " +
+                 "degrees of rotation in a single tick (about 1150 deg/s at 40Hz).")]
         [SerializeField] private float deltaRotationComponentRange = DefaultDeltaRotationComponentRange;
 
         [Tooltip("Max per-tick rotation for the 2-byte single-axis encoding, in degrees. This is " +

@@ -23,9 +23,39 @@ namespace MoodyBlues
         /// <summary>
         /// Applies one encoded transform event to a baseline, returning the state a receiver will
         /// hold afterwards. Properties the event doesn't carry pass through unchanged.
-        /// Returns false if <paramref name="eventBytes"/> isn't a transform event (1-23).
+        /// Returns false if <paramref name="eventBytes"/> isn't a transform event (1-23) or carries
+        /// an invalid quantized code (u = 2^n - 1 in a signed field, Spec.md Section 9).
         /// </summary>
         public static bool TryApplyTransformEvent(
+            ReadOnlySpan<byte> eventBytes,
+            Vector3 basePosition,
+            Quaternion baseRotation,
+            Vector3 baseScale,
+            out Vector3 position,
+            out Quaternion rotation,
+            out Vector3 scale)
+        {
+            if (!ApplyTransformEvent(eventBytes, basePosition, baseRotation, baseScale,
+                    out position, out rotation, out scale))
+            {
+                return false;
+            }
+
+            // An invalid code decodes to NaN, which propagates through the integration.
+            if (float.IsNaN(position.x + position.y + position.z)
+                || float.IsNaN(rotation.x + rotation.y + rotation.z + rotation.w)
+                || float.IsNaN(scale.x + scale.y + scale.z))
+            {
+                position = basePosition;
+                rotation = baseRotation;
+                scale = baseScale;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool ApplyTransformEvent(
             ReadOnlySpan<byte> eventBytes,
             Vector3 basePosition,
             Quaternion baseRotation,
@@ -128,7 +158,7 @@ namespace MoodyBlues
                     return true;
 
                 case EventType.DeltaUniformScale:
-                    scale = baseScale + Uniform(DeserializeFloatFromByteBuffer(-DeltaScaleRange, DeltaScaleRange, p));
+                    scale = baseScale + Uniform(DeserializeFloatFromByteBuffer(DeltaScaleRange, p));
                     return true;
 
                 case EventType.DeltaTransform:
@@ -159,12 +189,12 @@ namespace MoodyBlues
 
                 case EventType.DeltaPositionUniformScale:
                     position = basePosition + DecodeDeltaPosition(p);
-                    scale = baseScale + Uniform(DeserializeFloatFromByteBuffer(-DeltaScaleRange, DeltaScaleRange, p.Slice(4)));
+                    scale = baseScale + Uniform(DeserializeFloatFromByteBuffer(DeltaScaleRange, p.Slice(4)));
                     return true;
 
                 case EventType.DeltaRotationUniformScale:
                     rotation = baseRotation * DecodeDeltaRotation(p);
-                    scale = baseScale + Uniform(DeserializeFloatFromByteBuffer(-DeltaScaleRange, DeltaScaleRange, p.Slice(3)));
+                    scale = baseScale + Uniform(DeserializeFloatFromByteBuffer(DeltaScaleRange, p.Slice(3)));
                     return true;
 
                 default:
@@ -175,7 +205,7 @@ namespace MoodyBlues
         private static Vector3 Uniform(float v) => new Vector3(v, v, v);
 
         private static Vector3 DecodeTruePosition(ReadOnlySpan<byte> p) =>
-            DeserializeVector3FromUInt16Buffer(-PositionRange, PositionRange, p.Slice(0, 6));
+            DeserializePositionFromBuffer(PositionRange, p.Slice(0, 6));
 
         private static Vector3 DecodeScale(ReadOnlySpan<byte> p) =>
             DeserializeVector3FromUInt16Buffer(ScaleMin, ScaleMax, p.Slice(0, 6));
@@ -190,19 +220,19 @@ namespace MoodyBlues
             DeserializeQuaternionDropWFromBuffer(DeltaRotationComponentRange, p.Slice(0, 3));
 
         private static Vector3 DecodeDeltaScale(ReadOnlySpan<byte> p) =>
-            DeserializeVector3FromByteBuffer(-DeltaScaleRange, DeltaScaleRange, p.Slice(0, 3));
+            DeserializeVector3FromByteBuffer(DeltaScaleRange, p.Slice(0, 3));
 
         private static Quaternion DecodeTrueSingleAxisRotation(ReadOnlySpan<byte> p)
         {
-            (byte axisId, float angle) = DeserializeRotationSingleAxisFromBuffer(
+            (byte axisId, float angle) = DeserializeTrueSingleAxisFromBuffer(
                 TrueSingleAxisAngleMin, TrueSingleAxisAngleMax, p.Slice(0, 2));
             return AxisAngle(axisId, angle);
         }
 
         private static Quaternion DecodeDeltaSingleAxisRotation(ReadOnlySpan<byte> p)
         {
-            (byte axisId, float angle) = DeserializeRotationSingleAxisFromBuffer(
-                -DeltaSingleAxisAngleRange, DeltaSingleAxisAngleRange, p.Slice(0, 2));
+            (byte axisId, float angle) = DeserializeDeltaSingleAxisFromBuffer(
+                DeltaSingleAxisAngleRange, p.Slice(0, 2));
             return AxisAngle(axisId, angle);
         }
 

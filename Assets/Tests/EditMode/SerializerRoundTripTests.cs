@@ -32,7 +32,7 @@ namespace MoodyBlues.Tests
                 scaleMin: ScaleMin,
                 scaleMax: ScaleMax,
                 deltaPositionRange: 1.5f,
-                deltaRotationComponentRange: 0.5f,
+                deltaRotationComponentRange: 0.25f,
                 deltaSingleAxisAngleRange: 2f,
                 deltaScaleRange: 1f);
         }
@@ -90,6 +90,19 @@ namespace MoodyBlues.Tests
 
             ushort version = (ushort)(buffer[1] | (buffer[2] << 8));
             Assert.AreEqual(Serializer.ProtocolVersion, version);
+            Assert.AreEqual(4, version);
+        }
+
+        [Test]
+        public void BeginSession_DeclaresDefaultDeltaRotationRangeAsHalf0x3400()
+        {
+            var buffer = new byte[Serializer.BeginSessionSize];
+            Serializer.SerializeBeginSession(40f, buffer);
+
+            // type(1) + version(2) + captureHz(2) + position(2) + scaleMin(2) + scaleMax(2) +
+            // deltaPosition(2) puts DeltaRotationComponentRange at byte 13.
+            Assert.AreEqual(new byte[] { 0x04, 0x00 }, new[] { buffer[1], buffer[2] });
+            Assert.AreEqual(new byte[] { 0x00, 0x34 }, new[] { buffer[13], buffer[14] }, "0.25 = half 0x3400");
         }
 
         [Test]
@@ -212,7 +225,7 @@ namespace MoodyBlues.Tests
             Assert.AreEqual(0f, ranges.ScaleMin);
             Assert.AreEqual(5f, ranges.ScaleMax);
             Assert.AreEqual(0.25f, ranges.DeltaPositionRange);
-            Assert.AreEqual(0.4f, ranges.DeltaRotationComponentRange);
+            Assert.AreEqual(Serializer.ToHalfPrecision(0.4f), ranges.DeltaRotationComponentRange);
             Assert.AreEqual(1f, ranges.DeltaSingleAxisAngleRange);
             Assert.AreEqual(0.5f, ranges.DeltaScaleRange);
         }

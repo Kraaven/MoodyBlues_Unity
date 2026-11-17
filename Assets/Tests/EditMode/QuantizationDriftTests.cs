@@ -39,7 +39,7 @@ namespace MoodyBlues.Tests
                 scaleMin: -1f,
                 scaleMax: 10f,
                 deltaPositionRange: DeltaPositionRange,
-                deltaRotationComponentRange: 0.5f,
+                deltaRotationComponentRange: 0.25f,
                 deltaSingleAxisAngleRange: 2f,
                 deltaScaleRange: 1f);
         }
