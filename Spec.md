@@ -980,13 +980,21 @@ timeout. A 4xx response other than 408 or 429 is not retried, since the request 
 ### 13.2 Scene hash
 
 The hash answers one question: "is the export the backend holds valid for this scene?" It is
-computed without exporting anything, and combines up to three parts (`SceneHasher.Combine`):
+computed without exporting anything, and combines up to three parts plus the export format version
+(`SceneHasher.Combine`):
 
 ```
-sceneHash = SHA-256( "content:" + contentHash + "\n" +
+sceneHash = SHA-256( "format:" + ExportFormatVersion + "\n" +
+                     "content:" + contentHash + "\n" +
                      "structure:" + structuralHash + "\n" +
                      "export:" + exportHash )            lowercase hex
 ```
+
+**Export format version** (`SceneHasher.ExportFormatVersion`, now 2). A constant describing what the
+export contains. It is bumped whenever the export gains or changes data (v2: lightmaps, per-node
+lighting extras and the `MOODYBLUES_scene` extension, Section 13.3), so a client that exports more
+produces new scene versions instead of matching the older, poorer `.glb` the backend already holds
+for an unchanged scene.
 
 **Content hash** (`SceneContentHash`). SHA-256 over, for every asset in
 `AssetDatabase.GetDependencies(scenePath, recursive: true)` sorted by path (ordinal), the path and
@@ -1066,6 +1074,69 @@ Export rules:
     first, then by `Camera.depth` ascending, then by ObjectID ascending (several `MainCamera`s are
     ordered among themselves the same way); `tag` (string) is the GameObject's tag (`MainCamera`,
     `Untagged`, ...).
+  - `static` (bool, only when true, **Editor exports only**) -- the GameObject has the Contribute GI
+    static flag. The flag does not exist in a Player, so runtime exports never carry it;
+  - `lightmap` (object, only on nodes whose `MeshRenderer` is lightmapped) -- `index` (int) is the
+    index into `MOODYBLUES_scene.lightmaps` (equal to Unity's lightmap index); `scaleOffset`
+    `[sx, sy, ox, oy]` is in **glTF UV space**: `lightmapUV = TEXCOORD_1 * (sx, sy) + (ox, oy)`.
+    UnityGLTF writes `mesh.uv2` as `TEXCOORD_1` with V flipped (`v' = 1 - v`), so from Unity's
+    `renderer.lightmapScaleOffset = (x, y, z, w)`: `sx = x, sy = y, ox = z, oy = 1 - y - w`. The
+    lightmap image is stored top row first like every glTF image and is not flipped;
+  - `lightBake` (`"realtime"`, `"mixed"` or `"baked"`, only on nodes with a Light) -- from
+    `Light.bakingOutput.lightmapBakeType` (works in a Player; `"realtime"` when unknown).
+- **Root extension `MOODYBLUES_scene`** (listed in `extensionsUsed`, never in `extensionsRequired`, so
+  other glTF viewers ignore it). It describes the scene's lighting for a viewer that wants to look
+  like the game. All colours are **linear** RGB `[r, g, b]`.
+
+  ```
+  { "version": 1,
+    "ambient":  { "cube": [[r,g,b] x 6] },
+    "fog":      { "mode": "linear"|"exp"|"exp2", "color": [r,g,b], "density": f, "start": f, "end": f } | null,
+    "sky":      { "type": "procedural", "skyTint": [r,g,b], "groundColor": [r,g,b], "exposure": f,
+                  "sunSize": f, "sunSizeConvergence": f, "atmosphereThickness": f }
+              | { "type": "color", "color": [r,g,b] } | { "type": "other" },
+    "sun":      <ObjectID of RenderSettings.sun> | null,
+    "lighting": { "mixedMode": "subtractive"|"shadowmask"|"indirect" | null },
+    "post":     { "tonemapping": "none"|"neutral"|"aces", "postExposure": f,
+                  "bloom": { "intensity": f, "threshold": f, "tint": [r,g,b] } | null },   (URP only)
+    "lightmaps": [ { "texture": <glTF texture index>, "encoding": "rgbm", "range": 8 } ] }
+  ```
+
+  - `ambient.cube`: the ambient diffuse light Unity adds to a non-lightmapped surface whose normal
+    points along +X, -X, +Y, -Y, +Z, -Z **in glTF space** (glTF +X is Unity -X; Y and Z are the same),
+    including `RenderSettings.ambientIntensity`. It is `SphericalHarmonicsL2.Evaluate` of
+    `RenderSettings.ambientProbe`, which equals the shaders' `ShadeSH9`, times the intensity.
+    Because it is irradiance (an order-2 SH of the ambient gradient), +Y is not the raw sky colour: in
+    a Trilight scene it is a blend of sky and equator. A viewer evaluates a world normal `n` with
+    the Valve ambient cube: `nSq = n*n; c = nSq.x*(n.x>=0 ? cube[0] : cube[1]) + nSq.y*(n.y>=0 ?
+    cube[2] : cube[3]) + nSq.z*(n.z>=0 ? cube[4] : cube[5])`.
+  - `fog`: `RenderSettings` fog (Unity semantics: exp `1 - exp(-density*d)`, exp2
+    `1 - exp(-(density*d)^2)`, linear between `start` and `end`); null when fog is off.
+  - `sky`: `RenderSettings.skybox`. `Skybox/Procedural` exports its material properties; no skybox
+    exports the main camera's background colour as `color` (`other` when there is no main camera);
+    any other skybox is `other`.
+  - `sun`: ObjectID of `RenderSettings.sun`, null if none or not exported. Its direction is the
+    node's world -Z (the node has `invertLook`, like every light).
+  - `lighting.mixedMode`: the mixed lighting mode the scene was baked with, read from the first baked
+    Mixed light in the scene (`Light.bakingOutput.mixedLightingMode`, available in a Player). With no
+    such light: null if the scene has no lightmaps, else the Editor's `LightingSettings` mode (a
+    Player has no other source and writes null).
+  - `post`: present only in a URP project whose active pipeline is URP. Built from the default
+    volume profiles and the scene's enabled, global Volumes (higher priority wins; local volumes
+    are ignored): `Tonemapping.mode`, `ColorAdjustments.postExposure` (EV) and `Bloom` (null when
+    inactive or zero intensity; `threshold` as authored, `tint` linear). The URP dependency is
+    optional: `MoodyBlues.asmdef` defines `MOODYBLUES_URP` when `com.unity.render-pipelines.universal`
+    is installed.
+  - `lightmaps`: one entry per `LightmapSettings.lightmaps[i]` (array index == Unity lightmap
+    index); `texture` is null if Unity has no colour lightmap in that slot. The image is a lossless
+    8-bit RGBA PNG, linear (never sRGB), holding the HDR lightmap **RGBM-encoded**:
+    decode `color = rgb * a * range` (range 8), encode `m = ceil(clamp(max(r,g,b)/range, 1/255, 1)
+    * 255)/255; rgb = clamp(color/(m*range), 0, 1); a = m`. Brighter values clip at 8.
+    Unity stores lightmaps per platform as full HDR (BC6H/half/float), RGBM or double-LDR;
+    `LightmapDecoder` reads the texture's format, decodes it on the GPU with the matching formula
+    (Unity's `unity_Lightmap_HDR` multipliers) and re-encodes it, so the output does not depend on
+    the platform. Gamma colour space projects keep their gamma-space lighting numbers.
+    Directional lightmaps and shadowmasks are not exported.
 - UnityGLTF inserts an extra node (`<name>-flipped`) between a Camera or Light node and its
   children. It has no extras.
 - Meshes that cannot be exported are left off their node and counted: in a Player, meshes without

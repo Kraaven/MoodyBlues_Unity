@@ -212,6 +212,17 @@ the load state, and spawned objects are left out. If an object present at `Start
 destroyed or reparented, the client cannot export the scene as it loaded, so it logs a warning
 and keeps recording.
 
+**What the GLB carries for the look of the scene.** Besides geometry and materials, the export holds
+the scene's lighting so a viewer can reproduce the game's look (Spec.md Section 13.3): per node,
+`static` (Editor exports only), `lightmap` (lightmap index and a UV scale/offset already converted to
+glTF UV space) and `lightBake`; and a `MOODYBLUES_scene` root extension with the ambient light as a
+six-face cube, fog, sky, the sun's ObjectID, the mixed lighting mode (read from the baked mixed lights, so it works at runtime too), URP post-processing
+(tone mapping, exposure, bloom; only in URP projects) and every baked lightmap as an RGBM-encoded
+lossless PNG. Lightmaps are decoded from whatever Unity stored on the current platform (BC6H, RGBM
+or double-LDR), so the result does not depend on it. Directional lightmaps and shadowmasks are not
+exported. The scene hash includes an export format version (`SceneHasher.ExportFormatVersion`), so
+a client that exports more data creates new scene versions rather than reusing an older GLB.
+
 **The MoodyBlues menu** (the same tools are buttons in *MoodyBlues > Settings*):
 
 | Item | Does |
@@ -276,8 +287,14 @@ Assets/Scripts/                           assembly MoodyBlues (MoodyBlues.asmdef
     EventSendBuffer.cs                    the streamer's outgoing buffer: event sizes, the in-flight send, drop / refuse on overflow
     MoodyBluesStreamer.cs                 the WebSocket, the send pump, log splitting
   SceneExport/
-    SceneGltfExporter.cs                  UnityGLTF export; writes node extras (objectId, isHidden, invertLook, camera)
+    SceneGltfExporter.cs                  UnityGLTF export; writes node extras (objectId, isHidden, invertLook, camera, lighting)
     ObjectIdExportPlugin.cs               the UnityGLTF hook that calls it
+    SceneLookExporter.cs                  MOODYBLUES_scene extension (ambient, fog, sky, sun, lightmaps) and lighting node extras
+    SceneLookMath.cs                      lightmap UV conversion, RGBM encode/decode, ambient cube
+    LightmapDecoder.cs                    decodes Unity lightmaps (HDR / RGBM / dLDR) to RGBM textures
+    PostExporter.cs                       URP volume tone mapping, exposure, bloom (MOODYBLUES_URP only)
+    MoodyBluesSceneExtension.cs           the extension's UnityGLTF carrier
+    Resources/MoodyBluesLightmapDecode.shader   the decode blit shader (in Resources so Players include it)
   Editor/                                 assembly MoodyBlues.EditorTools
     SceneIdentityBuildProcessor.cs        bakes the scene GUID and content hash into Player builds
     SceneContentHashEditor.cs             content hash; registered for Play mode

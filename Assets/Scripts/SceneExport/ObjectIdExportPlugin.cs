@@ -11,7 +11,8 @@ namespace MoodyBlues
     /// - leaves out every transform without an ObjectID (ShouldNodeExport);
     /// - writes each node's ObjectID and MoodyBlues metadata into node.extras, so the backend can
     ///   key scene geometry back to wire-protocol ObjectIDs;
-    /// - applies the export's pose overrides and drops meshes that cannot be exported.
+    /// - applies the export's pose overrides and drops meshes that cannot be exported;
+    /// - adds the MOODYBLUES_scene root extension (lighting, sky, post, lightmaps) once the scene is written.
     ///
     /// UnityGLTF registers every export plugin it finds into its settings, so this also appears in
     /// Project Settings > UnityGLTF. Outside a MoodyBlues export it does nothing.
@@ -31,6 +32,11 @@ namespace MoodyBlues
             {
                 SceneGltfExporter.ExportJob job = SceneGltfExporter.Current;
                 return job == null || job.ShouldExport(transform);
+            }
+
+            public override void AfterSceneExport(GLTFSceneExporter exporter, GLTFRoot gltfRoot)
+            {
+                SceneGltfExporter.Current?.AfterSceneExport(exporter, gltfRoot);
             }
 
             public override void AfterNodeExport(GLTFSceneExporter exporter, GLTFRoot gltfRoot, Transform transform, Node node)

@@ -7,7 +7,9 @@
         "UnityGLTFScripts",
         "GLTFSerialization",
         "UnityGLTF.Plugins",
-        "UnityGLTF.Helpers"
+        "UnityGLTF.Helpers",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.RenderPipelines.Universal.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -18,6 +20,12 @@
     ],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.render-pipelines.universal",
+            "expression": "",
+            "define": "MOODYBLUES_URP"
+        }
+    ],
     "noEngineReferences": false
 }

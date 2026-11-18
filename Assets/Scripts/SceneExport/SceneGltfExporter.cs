@@ -39,6 +39,10 @@ namespace MoodyBlues
     /// spawned after the walk, EditorOnly objects, the scene-identity holder -- is left out.
     /// Nodes with a Camera also carry extras.camera = { index, tag } (see ExportJob.BuildCameraIndices).
     ///
+    /// The scene's lighting travels with it so a viewer can reproduce the game's look: per-node
+    /// static / lightmap / lightBake extras, and the MOODYBLUES_scene root extension with ambient,
+    /// fog, sky, sun, post-processing and the RGBM lightmap textures (see <see cref="SceneLookExporter"/>).
+    ///
     /// Meshes that cannot be exported are left off their node and counted:
     /// - in a Player, meshes without Read/Write (UnityGLTF skips them itself);
     /// - statically batched renderers, whose MeshFilter holds the whole combined batch rather
@@ -79,7 +83,7 @@ namespace MoodyBlues
             settings.ExportAnimations = false;         // Replays drive transforms from the recording.
             EnsureObjectIdPlugin(settings);
 
-            var job = new ExportJob(ids, stateOverrides);
+            var job = new ExportJob(scene, ids, stateOverrides);
             Current = job;
             try
             {
@@ -101,6 +105,7 @@ namespace MoodyBlues
             finally
             {
                 Current = null;
+                job.DestroyTemporaryTextures();
                 DestroySettings(settings);
             }
         }
@@ -164,15 +169,18 @@ namespace MoodyBlues
         /// <summary>State of one export, consulted by ObjectIdExportPlugin's callbacks.</summary>
         internal sealed class ExportJob
         {
+            private readonly Scene _scene;
             private readonly IReadOnlyDictionary<Transform, ushort> _ids;
             private readonly IReadOnlyDictionary<ushort, ExportNodeState> _overrides;
             private readonly Dictionary<Transform, int> _cameraIndices;
             private readonly List<string> _skippedNames = new();
+            private readonly List<Texture2D> _temporaryTextures = new();
 
             public int SkippedMeshes { get; private set; }
 
-            public ExportJob(IReadOnlyDictionary<Transform, ushort> ids, IReadOnlyDictionary<ushort, ExportNodeState> overrides)
+            public ExportJob(Scene scene, IReadOnlyDictionary<Transform, ushort> ids, IReadOnlyDictionary<ushort, ExportNodeState> overrides)
             {
+                _scene = scene;
                 _ids = ids;
                 _overrides = overrides;
                 _cameraIndices = BuildCameraIndices(ids);
@@ -206,9 +214,23 @@ namespace MoodyBlues
 
             public bool ShouldExport(Transform t) => t != null && _ids.ContainsKey(t);
 
+            /// <summary>Adds the MOODYBLUES_scene extension and its lightmap textures to the glTF root.</summary>
+            public void AfterSceneExport(GLTFSceneExporter exporter, GLTFRoot root)
+            {
+                SceneLookExporter.AddToRoot(exporter, root, _scene, _ids, _temporaryTextures);
+            }
+
+            /// <summary>Frees the RGBM lightmap copies; their bytes are already in the GLB.</summary>
+            public void DestroyTemporaryTextures()
+            {
+                foreach (Texture2D texture in _temporaryTextures) DestroyObject(texture);
+                _temporaryTextures.Clear();
+            }
+
             /// <summary>
             /// Writes node.extras: objectId, plus isHidden and invertLook when set, plus camera
-            /// { index, tag } when the transform has a Camera.
+            /// { index, tag } when the transform has a Camera, plus the lighting extras (static,
+            /// lightmap, lightBake; see <see cref="SceneLookExporter.AddNodeExtras"/>).
             /// </summary>
             public void AfterNodeExport(Transform t, Node node)
             {
@@ -244,6 +266,7 @@ namespace MoodyBlues
                 {
                     extras["camera"] = new JObject { ["index"] = cameraIndex, ["tag"] = t.gameObject.tag };
                 }
+                SceneLookExporter.AddNodeExtras(t, extras);
                 node.Extras = extras;
             }
 

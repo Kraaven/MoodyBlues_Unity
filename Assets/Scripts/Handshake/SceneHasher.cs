@@ -33,6 +33,14 @@ namespace MoodyBlues
     /// </summary>
     public static class SceneHasher
     {
+        /// <summary>
+        /// Version of what the scene export contains. Folded into the scene hash so that a client
+        /// whose export gained data (v2: lightmaps, lighting extras, MOODYBLUES_scene) produces new scene
+        /// versions instead of matching the older, poorer GLB the backend holds for an unchanged scene.
+        /// Bump it whenever the export's content changes.
+        /// </summary>
+        public const int ExportFormatVersion = 2;
+
         private const int TransformByteCount = 40; // 3 + 4 + 3 floats
 
         /// <summary>The structural hash of the running scene, over its initial-walk ObjectIDs.</summary>
@@ -62,11 +70,11 @@ namespace MoodyBlues
         /// <summary>
         /// The full scene hash sent in the handshake: SHA-256 over the content hash (the assets the
         /// scene uses, see SceneContentHash), the structural hash, and, for scenes exported on every
-        /// run, the hash of that export. Lowercase hex.
+        /// run, the hash of that export, and <see cref="ExportFormatVersion"/>. Lowercase hex.
         /// </summary>
         public static string Combine(string contentHash, string structuralHash, string exportHash = null)
         {
-            return HashText($"content:{contentHash ?? ""}\nstructure:{structuralHash}\nexport:{exportHash ?? ""}");
+            return HashText($"format:{ExportFormatVersion}\ncontent:{contentHash ?? ""}\nstructure:{structuralHash}\nexport:{exportHash ?? ""}");
         }
 
         public static string HashBytes(byte[] bytes)

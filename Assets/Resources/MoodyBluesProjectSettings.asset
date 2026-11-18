@@ -12,4 +12,4 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1cacfea62929a94498e47033dbdbe17e, type: 3}
   m_Name: MoodyBluesProjectSettings
   m_EditorClassIdentifier: MoodyBlues::MoodyBlues.MoodyBluesProjectSettings
-  connectionString: https://mbk_K6ctpEkdMqJJwnhDOL1KZSBmmcX2HeL7K2YL9VENuAM@moodyblues.kraaven.net
+  connectionString: https://mbk_6sJ-HSZLzJjcYwS3pUJyIe-8i9pbgIk_zFght5pKwOQ@moodyblues.kraaven.net
